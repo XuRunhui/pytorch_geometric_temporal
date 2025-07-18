@@ -110,6 +110,147 @@ class AccumulativeGainLoss(nn.Module):
             'abs_icir': abs_icir
         }
 
+    def compute_decile_analysis(self, predictions, returns):
+        """
+        按预测值将股票分成十组，计算top组和bottom组的平均收益率
+        
+        Args:
+            predictions: [T, N, D] 线性预测值
+            returns: [T, N, D] 未来T天的收益率，D为不同收益率类型
+            
+        Returns:
+            包含top组和bottom组收益率的字典
+        """
+        predictions_np = predictions.detach().cpu().numpy()  # [T, N, D]
+        returns_np = returns.detach().cpu().numpy()  # [T, N, D]
+        
+        T, N, D = returns_np.shape
+        
+        top_pred_returns = []
+        bottom_pred_returns = []
+        top_actual_returns = []
+        bottom_actual_returns = []
+        
+        for t in range(T):  # 遍历每一天
+            for d in range(D):  # 遍历每种收益率类型
+                pred_values = predictions_np[t, :, d]  # [N] 第t天第d种预测值
+                actual_returns = returns_np[t, :, d]  # [N] 第t天第d种收益率
+                
+                # 检查是否有有效数据
+                valid_mask = ~(np.isnan(pred_values) | np.isnan(actual_returns))
+                if valid_mask.sum() < 20:  # 至少需要20个有效样本才能分十组
+                    continue
+                    
+                valid_preds = pred_values[valid_mask]
+                valid_returns = actual_returns[valid_mask]
+                
+                # 按预测值排序
+                sorted_indices = np.argsort(valid_preds)
+                n_valid = len(valid_preds)
+                
+                # 计算十分位分组
+                decile_size = n_valid // 10
+                if decile_size == 0:
+                    continue
+                
+                # Top组 (预测值最高的10%)
+                top_indices = sorted_indices[-decile_size:]
+                top_pred_returns.extend(valid_preds[top_indices])
+                top_actual_returns.extend(valid_returns[top_indices])
+                
+                # Bottom组 (预测值最低的10%)
+                bottom_indices = sorted_indices[:decile_size]
+                bottom_pred_returns.extend(valid_preds[bottom_indices])
+                bottom_actual_returns.extend(valid_returns[bottom_indices])
+        
+        return {
+            'top_pred_return': np.mean(top_pred_returns) if top_pred_returns else 0.0,
+            'top_actual_return': np.mean(top_actual_returns) if top_actual_returns else 0.0,
+            'bottom_pred_return': np.mean(bottom_pred_returns) if bottom_pred_returns else 0.0,
+            'bottom_actual_return': np.mean(bottom_actual_returns) if bottom_actual_returns else 0.0,
+            'long_short_pred': (np.mean(top_pred_returns) - np.mean(bottom_pred_returns)) if (top_pred_returns and bottom_pred_returns) else 0.0,
+            'long_short_actual': (np.mean(top_actual_returns) - np.mean(bottom_actual_returns)) if (top_actual_returns and bottom_actual_returns) else 0.0
+        }
+
+    def compute_linear_rank_ic_and_icir(self, predictions, returns):
+        """
+        计算线性预测值的RankIC和ICIR指标
+        
+        Args:
+            predictions: [T, N, D] 线性预测值
+            returns: [T, N, D] 未来T天的收益率，D为不同收益率类型
+            
+        Returns:
+            rank_ic: 预测值与收益率的平均RankIC
+            icir: 历史RankIC序列的信息比率
+        """
+        predictions_np = predictions.detach().cpu().numpy()  # [T, N, D]
+        returns_np = returns.detach().cpu().numpy()  # [T, N, D]
+        
+        T, N, D = returns_np.shape
+        
+        # 计算每个时间和维度的RankIC
+        daily_rank_ics = []
+        daily_abs_rank_ics = []
+        
+        for t in range(T):  # 遍历每一天
+            for d in range(D):  # 遍历每种收益率类型
+                pred_values = predictions_np[t, :, d]  # [N] 第t天第d种预测值
+                actual_returns = returns_np[t, :, d]  # [N] 第t天第d种收益率
+                
+                # 检查是否有有效数据
+                valid_mask = ~(np.isnan(pred_values) | np.isnan(actual_returns))
+                if valid_mask.sum() < 10:  # 至少需要10个有效样本
+                    continue
+                    
+                valid_preds = pred_values[valid_mask]
+                valid_returns = actual_returns[valid_mask]
+                
+                # 计算Spearman秩相关系数
+                try:
+                    rank_ic, _ = stats.spearmanr(valid_preds, valid_returns)
+                    if not np.isnan(rank_ic):
+                        # Get the importance weight as a CPU float
+                        importance_weight = self.importance_weights[d].cpu().item()
+                        daily_rank_ics.append(rank_ic * importance_weight)
+                        daily_abs_rank_ics.append(abs(rank_ic) * importance_weight)
+                except:
+                    continue
+        
+        if not daily_rank_ics:
+            return {'rank_ic': 0.0, 'abs_rank_ic': 0.0, 'icir': 0.0, 'abs_icir': 0.0}
+            
+        # 当前的平均RankIC
+        current_rank_ic = np.mean(daily_rank_ics)
+        current_abs_rank_ic = np.mean(daily_abs_rank_ics)
+        
+        # 更新历史RankIC记录
+        self.rank_ic_history.append(current_rank_ic)
+        self.abs_rank_ic_history.append(current_abs_rank_ic)
+        
+        # 保持历史记录在合理范围内（例如最近100个值）
+        if len(self.rank_ic_history) > 100:
+            self.rank_ic_history = self.rank_ic_history[-100:]
+            self.abs_rank_ic_history = self.abs_rank_ic_history[-100:]
+        
+        # 计算ICIR（需要至少5个历史值）
+        if len(self.rank_ic_history) >= 5:
+            rank_ic_series = np.array(self.rank_ic_history)
+            abs_rank_ic_series = np.array(self.abs_rank_ic_history)
+            
+            icir = np.mean(rank_ic_series) / (np.std(rank_ic_series) + 1e-8)
+            abs_icir = np.mean(abs_rank_ic_series) / (np.std(abs_rank_ic_series) + 1e-8)
+        else:
+            icir = 0.0
+            abs_icir = 0.0
+            
+        return {
+            'rank_ic': current_rank_ic,
+            'abs_rank_ic': current_abs_rank_ic,
+            'icir': icir,
+            'abs_icir': abs_icir
+        }
+
     def forward(self, preds: torch.Tensor, y_ts: torch.Tensor, compute_metrics: bool = False) -> torch.Tensor:
         """
         Args:
@@ -131,23 +272,18 @@ class AccumulativeGainLoss(nn.Module):
         total_loss_corr = 0.0
         total_loss_mse = 0.0  # 用于记录线性规划的MSE
         
-        # 用于存储所有batch的RankIC值
-        batch_rank_ics = []
-        batch_abs_rank_ics = []
-        batch_icirs = []
-        batch_abs_icirs = []
+        # 用于存储线性预测因子的RankIC值
+        batch_linear_rank_ics = []
+        batch_linear_abs_rank_ics = []
+        batch_linear_icirs = []
+        batch_linear_abs_icirs = []
+        
+        # 用于存储十分组分析结果
+        batch_decile_results = []
 
         for b in range(B):
             F_b = preds[b]          # [N, K]
             y_b = y_ts[b]           # [T, N, D]
-
-            # === 计算RankIC和ICIR ===
-            if compute_metrics:
-                ic_metrics = self.compute_rank_ic_and_icir(F_b, y_b)
-                batch_rank_ics.append(ic_metrics['rank_ic'])
-                batch_abs_rank_ics.append(ic_metrics['abs_rank_ic'])
-                batch_icirs.append(ic_metrics['icir'])
-                batch_abs_icirs.append(ic_metrics['abs_icir'])
 
             # === 计算 pseudo-inverse: (F^T F)^(-1) F^T ===
             FtF = F_b.T @ F_b
@@ -180,11 +316,32 @@ class AccumulativeGainLoss(nn.Module):
             loss_corr = (off_diag ** 2).sum()
             total_loss_corr += loss_corr
 
-            # === 计算线性规划的MSE ===
+            # === 计算线性预测的MSE和RankIC ===
+            # 选择第一个时间和维度计算MSE
             y_t_selected = y_b[0, :, 0]  # 选择 T 维度第一个和 D 维度第一个 [N]
             y_hat_selected = F_b @ (pseudo_inv @ y_t_selected)  # [N]
             mse_loss = torch.mean((y_hat_selected - y_t_selected) ** 2)  # MSE loss
             total_loss_mse += mse_loss
+            
+            # 计算所有T和D维度的线性预测值作为因子
+            if compute_metrics:
+                # 计算所有T和D维度的线性预测值
+                y_hat_all = torch.zeros_like(y_b)  # [T, N, D]
+                for t in range(T):
+                    for d in range(D):
+                        y_t_d = y_b[t, :, d]  # [N]
+                        y_hat_all[t, :, d] = F_b @ (pseudo_inv @ y_t_d)  # [N]
+                
+                # 使用compute_linear_rank_ic_and_icir函数计算线性预测的RankIC
+                linear_ic_metrics = self.compute_linear_rank_ic_and_icir(y_hat_all, y_b)
+                batch_linear_rank_ics.append(linear_ic_metrics['rank_ic'])
+                batch_linear_abs_rank_ics.append(linear_ic_metrics['abs_rank_ic'])
+                batch_linear_icirs.append(linear_ic_metrics['icir'])
+                batch_linear_abs_icirs.append(linear_ic_metrics['abs_icir'])
+                
+                # 计算十分组分析
+                decile_metrics = self.compute_decile_analysis(y_hat_all, y_b)
+                batch_decile_results.append(decile_metrics)
 
         # 求所有 batch 平均
         mean_loss_r2 = total_loss_r2 / B
@@ -194,13 +351,34 @@ class AccumulativeGainLoss(nn.Module):
         # 将RankIC和ICIR信息作为属性附加到loss tensor上
         # 这样外部可以直接访问而不需要重新计算
         if compute_metrics:
+            # 计算十分组分析的平均值
+            if batch_decile_results:
+                avg_decile_metrics = {}
+                for key in batch_decile_results[0].keys():
+                    avg_decile_metrics[key] = np.mean([result[key] for result in batch_decile_results])
+            else:
+                avg_decile_metrics = {
+                    'top_pred_return': 0.0,
+                    'top_actual_return': 0.0,
+                    'bottom_pred_return': 0.0,
+                    'bottom_actual_return': 0.0,
+                    'long_short_pred': 0.0,
+                    'long_short_actual': 0.0
+                }
+            
             loss.rank_ic_info = {
                 'loss_mse': float(mean_loss_mse.item()),  # 转换为Python float
-                'mean_rank_ic': np.mean(batch_rank_ics) if batch_rank_ics else 0.0,
-                'mean_abs_rank_ic': np.mean(batch_abs_rank_ics) if batch_abs_rank_ics else 0.0,
-                'mean_icir': np.mean(batch_icirs) if batch_icirs else 0.0,
-                'mean_abs_icir': np.mean(batch_abs_icirs) if batch_abs_icirs else 0.0,
-                'loss_r2': float(mean_loss_r2.item())  # 转换为Python float
+                'loss_r2': float(mean_loss_r2.item()),  # 转换为Python float
+                'linear_rank_ic': np.mean(batch_linear_rank_ics) if batch_linear_rank_ics else 0.0,
+                'linear_abs_rank_ic': np.mean(batch_linear_abs_rank_ics) if batch_linear_abs_rank_ics else 0.0,
+                'linear_icir': np.mean(batch_linear_icirs) if batch_linear_icirs else 0.0,
+                'linear_abs_icir': np.mean(batch_linear_abs_icirs) if batch_linear_abs_icirs else 0.0,
+                'top_pred_return': avg_decile_metrics['top_pred_return'],
+                'top_actual_return': avg_decile_metrics['top_actual_return'],
+                'bottom_pred_return': avg_decile_metrics['bottom_pred_return'],
+                'bottom_actual_return': avg_decile_metrics['bottom_actual_return'],
+                'long_short_pred': avg_decile_metrics['long_short_pred'],
+                'long_short_actual': avg_decile_metrics['long_short_actual']
             }
         
         return loss

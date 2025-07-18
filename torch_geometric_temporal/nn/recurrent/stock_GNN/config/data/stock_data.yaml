@@ -7,7 +7,7 @@ use_factors: true
 
 # Sequence and prediction settings
 sequence_length: 30
-prediction_horizons: [1, 5, 10]  # Prediction time horizons in days
+prediction_horizons: [1]  # Prediction time horizons in days
 
 # Data splitting
 train_ratio: 0.7

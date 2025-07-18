@@ -133,6 +133,7 @@ def create_model(cfg: DictConfig, node_feat_dim: int) -> DynamicGraphLightning:
         gat_heads=getattr(model_cfg, 'gat_heads', 4),
         gat_dropout=getattr(model_cfg, 'gat_dropout', 0.1),
         predict_return=getattr(model_cfg, "predict_return", False),
+        pure_gru=getattr(model_cfg, "pure_gru", False),
     )
     
     print(f"🧠 Created model:")
@@ -155,15 +156,22 @@ def create_trainer(cfg: DictConfig, callbacks: list, logger) -> pl.Trainer:
     
     # Handle devices configuration for DDP
     devices = trainer_cfg.devices
-    if isinstance(devices, int) and devices > 1 and trainer_cfg.strategy == "ddp":
-        print(f"🔥 Using DDP with {devices} GPUs")
+    strategy = trainer_cfg.strategy
+    
+    # For pure_gru mode, we need to handle unused parameters in DDP
+    if cfg.model.get("pure_gru", False) and strategy == "ddp":
+        print("🔧 Pure GRU mode detected with DDP - enabling find_unused_parameters")
+        strategy = "ddp_find_unused_parameters_true"
+    
+    if isinstance(devices, int) and devices > 1 and "ddp" in strategy:
+        print(f"🔥 Using DDP with {devices} GPUs, strategy: {strategy}")
     
     trainer = pl.Trainer(
         max_epochs=trainer_cfg.max_epochs,
         min_epochs=trainer_cfg.get("min_epochs", 1),
         accelerator=trainer_cfg.accelerator,
         devices=devices,
-        strategy=trainer_cfg.strategy,
+        strategy=strategy,
         precision=trainer_cfg.get("precision", "32-true"),
         benchmark=trainer_cfg.get("benchmark", True),
         deterministic=trainer_cfg.get("deterministic", False),
@@ -191,7 +199,7 @@ def create_trainer(cfg: DictConfig, callbacks: list, logger) -> pl.Trainer:
     print(f"   - Max epochs: {trainer_cfg.max_epochs}")
     print(f"   - Accelerator: {trainer_cfg.accelerator}")
     print(f"   - Devices: {devices}")
-    print(f"   - Strategy: {trainer_cfg.strategy}")
+    print(f"   - Strategy: {strategy}")
     print(f"   - Precision: {trainer_cfg.get('precision', '32-true')}")
     
     return trainer

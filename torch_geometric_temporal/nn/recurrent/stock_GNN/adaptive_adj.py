@@ -2,6 +2,7 @@
 import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
+import numpy as np
 from torch import nn
 from torch_geometric.nn import GCNConv, GATConv  # Add GATConv import
 from torch_geometric.data import Batch
@@ -27,6 +28,7 @@ class DynamicGraphLightning(pl.LightningModule):
         gat_dropout: float = 0.1,  # Dropout for GAT attention
         predict_return: bool = False, # whether predict the final return
         output_factor_dim: int = 32,
+        pure_gru = False,
     ):
         super().__init__()
         # 1) 用于序列编码的 GRU（或 LSTM/GRUCell）
@@ -35,44 +37,57 @@ class DynamicGraphLightning(pl.LightningModule):
             hidden_size=gru_hidden_dim,
             batch_first=True,
         )
+
+        self.gru_sim = nn.GRU(
+            input_size=node_feat_dim,
+            hidden_size=gru_hidden_dim,
+            batch_first=True,
+        )
         # 2) 用于图消息传递的 GNN 层
         self.gnn_type = gnn_type.lower()
         self.gat_heads = gat_heads
         self.gat_dropout = gat_dropout
+        self.pure_gru = pure_gru
         
-        if self.gnn_type == "gat":
-            # GAT layers with multi-head attention
-            self.gnn1 = GATConv(
-                gru_hidden_dim, 
-                gnn_hidden_dim // gat_heads,  # Output dim per head
-                heads=gat_heads,
-                dropout=gat_dropout,
-                add_self_loops=add_self_loops,
-                concat=True  # Concatenate multi-head outputs
-            )
-            self.gnn2 = GATConv(
-                gnn_hidden_dim,  # Input is concatenated output from gnn1 (heads * out_dim)
-                gnn_hidden_dim,  # Final output dimension
-                heads=1,  # Single head for final layer
-                dropout=gat_dropout,
-                add_self_loops=add_self_loops,
-                concat=False  # Don't concatenate (only 1 head anyway)
-            )
-            # Final dimension is what we specify for gnn2
-            self.final_gnn_dim = gnn_hidden_dim
+        if not self.pure_gru:
+            # 只有在非 pure_gru 模式下才初始化 GNN 层
+            if self.gnn_type == "gat":
+                # GAT layers with multi-head attention
+                self.gnn1 = GATConv(
+                    gru_hidden_dim, 
+                    gnn_hidden_dim // gat_heads,  # Output dim per head
+                    heads=gat_heads,
+                    dropout=gat_dropout,
+                    add_self_loops=add_self_loops,
+                    concat=True  # Concatenate multi-head outputs
+                )
+                self.gnn2 = GATConv(
+                    gnn_hidden_dim,  # Input is concatenated output from gnn1 (heads * out_dim)
+                    gnn_hidden_dim,  # Final output dimension
+                    heads=1,  # Single head for final layer
+                    dropout=gat_dropout,
+                    add_self_loops=add_self_loops,
+                    concat=False  # Don't concatenate (only 1 head anyway)
+                )
+                # Final dimension is what we specify for gnn2
+                self.final_gnn_dim = gnn_hidden_dim
+            else:
+                # Default GCN layers
+                self.gnn1 = GCNConv(gru_hidden_dim, gnn_hidden_dim, add_self_loops=add_self_loops)
+                self.gnn2 = GCNConv(gnn_hidden_dim, gnn_hidden_dim, add_self_loops=add_self_loops)
+                self.final_gnn_dim = gnn_hidden_dim
         else:
-            # Default GCN layers
-            self.gnn1 = GCNConv(gru_hidden_dim, gnn_hidden_dim, add_self_loops=add_self_loops)
-            self.gnn2 = GCNConv(gnn_hidden_dim, gnn_hidden_dim, add_self_loops=add_self_loops)
-            self.final_gnn_dim = gnn_hidden_dim
-            
+            # 在 pure_gru 模式下，最终维度就是 GRU 的隐藏维度
+            self.final_gnn_dim = gru_hidden_dim
+
         # 3) 最后预测层（添加BatchNorm）
         self.batch_norm = nn.BatchNorm1d(self.final_gnn_dim)
         self.output_factor_dim = output_factor_dim
         self.predictor = nn.Linear(self.final_gnn_dim, self.output_factor_dim)  # 回归示例
         self.predict_return = predict_return
         if self.predict_return:
-            self.return_predictor = self.return_predictor = nn.ModuleList([
+            print("predicting return mode")
+            self.return_predictor = nn.ModuleList([
                 nn.ReLU(),  # ReLU activation
                 nn.Linear(self.output_factor_dim, 1)  # Linear layer
             ])
@@ -83,10 +98,10 @@ class DynamicGraphLightning(pl.LightningModule):
         self.metric_compute_frequency = metric_compute_frequency
         self.weight_decay = weight_decay
         self.scheduler_config = scheduler_config or {}
-        
+        self.pure_gru = pure_gru
         # Log model configuration
-        print(f"🏗️  GNN Architecture: {self.gnn_type.upper()}")
-        if self.gnn_type == "gat":
+        print(f"🏗️  Model Architecture: {'Pure GRU' if self.pure_gru else f'GRU + {self.gnn_type.upper()}'}")
+        if self.gnn_type == "gat" and not self.pure_gru:
             print(f"   - GAT heads: {self.gat_heads}")
             print(f"   - GAT dropout: {self.gat_dropout}")
             print(f"   - Final GNN dim: {self.final_gnn_dim}")
@@ -107,6 +122,9 @@ class DynamicGraphLightning(pl.LightningModule):
         1. 如果输入是tensor: torch.Tensor [batch_size, num_nodes, 1]
         2. 如果输入是list: list[torch.Tensor] [graph1_output, graph2_output, ...]
         """
+        if self.pure_gru:
+            return self._forward_gru(data_input)
+
         if isinstance(data_input, torch.Tensor):
             # 处理固定大小的批量图数据
             return self._forward_batch_tensor(data_input)
@@ -116,6 +134,44 @@ class DynamicGraphLightning(pl.LightningModule):
         else:
             raise ValueError("Input must be either torch.Tensor or list of torch.Tensor")
     
+    def _forward_gru(self, x_seq: torch.Tensor) -> torch.Tensor:
+        if x_seq.dim() == 3:
+            # If input is [batch_size, num_nodes, feat_dim], add seq_len dimension
+            b, n, f = x_seq.shape
+            l = 1
+            # x_seq = x_seq.unsqueeze(2)  # [batch_size, num_nodes, 1, feat_dim]
+            x_seq = x_seq.unsqueeze(1)  # [batch_size, 1, feat_dim, num_nodes]
+        else:
+            # b, n, l, f = x_seq.shape
+            b, l, f, n = x_seq.shape  # [batch_size, seq_len, feat_dim, num_nodes]
+        
+        # Reshape for GRU: [seq_len, batch_size * num_nodes, feat_dim]
+        # gru_in = x_seq.permute(2, 0, 1, 3).reshape(l, b * n, f)
+        gru_in = x_seq.permute(1, 0, 3, 2).reshape(l, b * n, f)  # [seq_len, batch_size * num_nodes, feat_dim]
+        gru_out, _ = self.gru(gru_in)    # 输出: [seq_len, batch_size * num_nodes, gru_hidden_dim]
+
+        h = gru_out[-1].view(b, n, -1)  # 取最后一个时间步的输出: [batch_size, num_nodes, gru_hidden_dim]
+        # TensorBoard logging: log GRU output stats
+        self.log('stats/gru_output_mean', h.mean().item(), on_step=True, on_epoch=False)
+        self.log('stats/gru_output_std', h.std().item(), on_step=True, on_epoch=False)
+        # ——— 2. BatchNorm 和预测 —————
+        # 重新整形为 [batch_size * num_nodes, gru_hidden_dim] 以应用 BatchNorm
+        h_flat = h.view(b * n, -1)  # [batch_size * num_nodes, gru_hidden_dim]
+        out2_normalized = self.batch_norm(h_flat)  # [batch_size * num_nodes, gru_hidden_dim]
+        out = self.predictor(out2_normalized)  # [batch_size * num_nodes, output_factor_dim]
+        return_output = out
+        if self.predict_return:
+            return_output = self.forward_return(out)  # Pass normalized output through return predictor
+        final_out = return_output.view(b, n, -1)  # [batch, num_nodes, output_factor_dim/1]
+        # TensorBoard logging: log output stats
+        self.log('stats/final_output_mean', final_out.mean().item(), on_step=True, on_epoch=False)
+        self.log('stats/final_output_std', final_out.std().item(), on_step=True, on_epoch=False)
+        if self.predict_return:
+            return out.view(b, n, -1), final_out
+        return final_out
+    
+
+
     def _forward_batch_tensor(self, x_seq: torch.Tensor) -> torch.Tensor:
         """处理固定大小的批量图数据"""
         # print(f"x's shape:{x_seq.shape}")
@@ -133,9 +189,14 @@ class DynamicGraphLightning(pl.LightningModule):
         # Reshape for GRU: [seq_len, batch_size * num_nodes, feat_dim]
         # gru_in = x_seq.permute(2, 0, 1, 3).reshape(l, b * n, f)
         gru_in = x_seq.permute(1, 0, 3, 2).reshape(l, b * n, f)  # [seq_len, batch_size * num_nodes, feat_dim]
-        gru_out, _ = self.gru(gru_in)    # 输出: [seq_len, batch_size * num_nodes, gru_hidden_dim]
 
-        h = gru_out[-1].view(b, n, -1)  # 取最后一个时间步的输出: [batch_size, num_nodes, gru_hidden_dim]
+        gru_out_sim, _ = self.gru_sim(gru_in)
+        h = gru_out_sim[-1].view(b, n, -1)  # 取最后一个时间步的输出: [batch_size, num_nodes, gru_hidden_dim]
+
+        gru_out, _ = self.gru(gru_in)    # 输出: [seq_len, batch_size * num_nodes, gru_hidden_dim]
+        h_out = gru_out[-1].view(b, n, -1)  # 取最后一个时间步的输出: [batch_size, num_nodes, gru_hidden_dim]
+
+        # h = gru_out[-1].view(b, n, -1)  # 取最后一个时间步的输出: [batch_size, num_nodes, gru_hidden_dim]
         # TensorBoard logging: log GRU output stats
         self.log('stats/gru_output_mean', h.mean().item(), on_step=True, on_epoch=False)
         self.log('stats/gru_output_std', h.std().item(), on_step=True, on_epoch=False)
@@ -169,7 +230,7 @@ class DynamicGraphLightning(pl.LightningModule):
             weight_flat = edge_weight[i].contiguous().view(-1)  # [n*k]
             
             data = Data(
-                x=h[i],  # [n, feat_dim]
+                x=h_out[i],  # [n, feat_dim]
                 edge_index=torch.stack([src_flat, dst_flat], dim=0),  # [2, n*k]
                 edge_weight=weight_flat  # [n*k]
             )
@@ -217,6 +278,8 @@ class DynamicGraphLightning(pl.LightningModule):
         # TensorBoard logging: log output stats
         self.log('stats/final_output_mean', final_out.mean().item(), on_step=True, on_epoch=False)
         self.log('stats/final_output_std', final_out.std().item(), on_step=True, on_epoch=False)
+        if self.predict_return:
+            return out.view(b, n, -1), final_out
         return final_out
     
     def _forward_graph_list(self, graph_list: list) -> list:
@@ -341,7 +404,10 @@ class DynamicGraphLightning(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # batch: 来自你的 DataLoader，格式可以是 (x_t, y_t)
         x_t, y_t = batch
-        y_pred = self(x_t)
+        if self.predict_return:
+            inter_feature, y_pred = self(x_t)
+        else:
+            y_pred = self(x_t)
         
         # Determine if we should compute metrics this epoch
         # compute_metrics = self._should_compute_metrics()
@@ -354,19 +420,23 @@ class DynamicGraphLightning(pl.LightningModule):
             total_nodes = 0
             for i, (pred, target) in enumerate(zip(y_pred, y_t)):
                 if isinstance(target, torch.Tensor):
-                    loss_i = self.loss_fn(pred.squeeze(-1), target.float(), compute_metrics=compute_metrics)
+                    loss_i = self.loss_fn(pred, target.float(), compute_metrics=compute_metrics)
                     total_loss += loss_i * pred.size(0)  # 按节点数加权
                     total_nodes += pred.size(0)
             loss = total_loss / total_nodes if total_nodes > 0 else total_loss
         else:
             # 固定大小图的情况
-            loss = self.loss_fn(y_pred.squeeze(-1), y_t.float(), compute_metrics=compute_metrics)
+            if self.predict_return:
+                # 当预测return时，使用inter_feature作为预测因子，y_t作为目标
+                loss = self.loss_fn(inter_feature, y_pred, y_t.float(), compute_metrics=compute_metrics)
+            else:
+                loss = self.loss_fn(y_pred, y_t.float(), compute_metrics=compute_metrics)
             
             # 只在计算指标的epoch记录RankIC和ICIR
             if compute_metrics and hasattr(loss, 'rank_ic_info'):
                 rank_ic_info = loss.rank_ic_info
                 for metric_name, metric_value in rank_ic_info.items():
-                    if isinstance(metric_value, (int, float)) and metric_value != 0.0:
+                    if not np.isnan(metric_value):
                         self.log(f'train_{metric_name}', metric_value, 
                                  on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         
@@ -378,10 +448,13 @@ class DynamicGraphLightning(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x_t, y_t = batch
-        y_pred = self(x_t)
+        if self.predict_return:
+            inter_feature, y_pred = self(x_t)
+        else:
+            y_pred = self(x_t)
         
-        # Determine if we should compute metrics this epoch
-        compute_metrics = self._should_compute_metrics()
+        # Determine if we should compute metrics this epoch (always True for validation)
+        compute_metrics = True  # Always compute metrics in validation for better monitoring
         
         # 处理不同的输出格式
         if isinstance(y_pred, list):
@@ -390,19 +463,24 @@ class DynamicGraphLightning(pl.LightningModule):
             total_nodes = 0
             for i, (pred, target) in enumerate(zip(y_pred, y_t)):
                 if isinstance(target, torch.Tensor):
-                    loss_i = self.loss_fn(pred.squeeze(-1), target.float(), compute_metrics=compute_metrics)
+                    loss_i = self.loss_fn(pred, target.float(), compute_metrics=compute_metrics)
                     total_loss += loss_i * pred.size(0)  # 按节点数加权
                     total_nodes += pred.size(0)
             loss = total_loss / total_nodes if total_nodes > 0 else total_loss
         else:
             # 固定大小图的情况
-            loss = self.loss_fn(y_pred.squeeze(-1), y_t.float(), compute_metrics=compute_metrics)
+            if self.predict_return:
+                # 当预测return时，使用inter_feature作为预测因子，y_t作为目标
+                loss = self.loss_fn(inter_feature, y_pred, y_t.float(), compute_metrics=compute_metrics)
+            else:
+                loss = self.loss_fn(y_pred, y_t.float(), compute_metrics=compute_metrics)
             
             # 只在计算指标的epoch记录RankIC和ICIR
             if compute_metrics and hasattr(loss, 'rank_ic_info'):
                 rank_ic_info = loss.rank_ic_info
                 for metric_name, metric_value in rank_ic_info.items():
-                    if isinstance(metric_value, (int, float)) and metric_value != 0.0:
+                    if not np.isnan(metric_value):
+                        # print(f"logging val_{metric_name}")
                         self.log(f'val_{metric_name}', metric_value, 
                                  on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         
@@ -415,7 +493,10 @@ class DynamicGraphLightning(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x_t, y_t = batch
-        y_pred = self(x_t)
+        if self.predict_return:
+            inter_feature, y_pred = self(x_t)
+        else:
+            y_pred = self(x_t)
         
         # Always compute metrics during testing for final evaluation
         compute_metrics = True
@@ -424,18 +505,23 @@ class DynamicGraphLightning(pl.LightningModule):
             total_loss = 0.0
             total_nodes = 0
             for pred, target in zip(y_pred, y_t):
-                loss_i = self.loss_fn(pred.squeeze(-1), target.float(), compute_metrics=compute_metrics)
+                loss_i = self.loss_fn(pred, target.float(), compute_metrics=compute_metrics)
                 total_loss += loss_i * pred.size(0)
                 total_nodes += pred.size(0)
             loss = total_loss / total_nodes if total_nodes>0 else total_loss
         else:
-            loss = self.loss_fn(y_pred.squeeze(-1), y_t.float(), compute_metrics=compute_metrics)
+            # 固定大小图的情况
+            if self.predict_return:
+                # 当预测return时，使用inter_feature作为预测因子，y_t作为目标
+                loss = self.loss_fn(inter_feature, y_pred, y_t.float(), compute_metrics=compute_metrics)
+            else:
+                loss = self.loss_fn(y_pred, y_t.float(), compute_metrics=compute_metrics)
             
             # Log all test metrics
             if hasattr(loss, 'rank_ic_info'):
                 rank_ic_info = loss.rank_ic_info
                 for metric_name, metric_value in rank_ic_info.items():
-                    if isinstance(metric_value, (int, float)) and metric_value != 0.0:
+                    if not np.isnan(metric_value):
                         self.log(f'test_{metric_name}', metric_value, 
                                  on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
                         print(f"Final test {metric_name}: {metric_value:.6f}")
