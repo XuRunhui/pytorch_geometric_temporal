@@ -1,23 +1,28 @@
 # Dynamic Graph Lightning model configuration
 # @package model
 
-# Model architecture
-node_feat_dim: null  # Will be set automatically based on data
-gru_hidden_dim: 64
+defaults:
+  - base_dynamic_graph
+
+# Override specific parameters for standard dynamic graph configuration
 gnn_hidden_dim: 128
-k_nn: 8  # Number of nearest neighbors for dynamic adjacency
+k_nn: 8
+pure_gru: false
+predict_return: false
+
+# GNN specific settings
+gnn_type: "gcn"
 add_self_loops: true
 
-# Output layer
-output_dim: 32  # Factor prediction dimension
-
-# Optimization
+# Optimization settings
 lr: 1e-3
 weight_decay: 1e-4
-scheduler:
-  type: "plateau"  # Options: "plateau", "cosine", "step", "exponential", null
-  # ReduceLROnPlateau parameters
+
+scheduler_config:
+  type: "plateau"
   patience: 5
+  factor: 0.5
+  min_lr: 1e-6
   factor: 0.5
   min_lr: 1e-6
   # CosineAnnealingLR parameters  
