@@ -76,9 +76,10 @@ class StockDataset(Dataset):
     
     def __getitem__(self, idx):
         """
+        返回只包含完整序列数据的股票
         Returns:
-            features: [sequence_length, feature_dim, n_stocks]
-            targets: [prediction_horizon, n_stocks]
+            features: [sequence_length, feature_dim, n_valid_stocks]
+            targets: [prediction_horizon, n_valid_stocks]
         """
         current_idx = self.valid_indices[idx]
         
@@ -87,25 +88,59 @@ class StockDataset(Dataset):
         end_idx = current_idx
         features = self.features[start_idx:end_idx]  # [L, F, N]
         
+        # 获取未来 T 期的收益率（先获取，后面会根据有效股票进行筛选）
+        end_target_idx = current_idx + self.prediction_horizon
+        targets = self.targets[current_idx:end_target_idx]  # [T, N]
+        
+        # 找出在这个序列期间没有NaN值的股票
+        valid_stock_mask = self._get_valid_stocks_for_sequence(features)
+        
+        if valid_stock_mask.sum() == 0:
+            # 如果没有完全有效的股票，选择NaN最少的股票
+            nan_counts = torch.isnan(features).sum(dim=(0, 1))  # [N] - 每只股票的NaN数量
+            min_nan_count = nan_counts.min()
+            valid_stock_mask = (nan_counts == min_nan_count)
+            print(f"警告: 时间步{current_idx}没有完全有效的股票，选择NaN最少的股票(NaN数量={min_nan_count})")
+        
+        # 只保留有效股票的数据
+        features = features[:, :, valid_stock_mask]  # [L, F, N_valid]
+        targets = targets[:, valid_stock_mask]       # [T, N_valid]
+        
+        # 对targets填充NaN为0（收益率缺失视为0收益）
+        targets = torch.where(torch.isnan(targets), torch.zeros_like(targets), targets)
+        
         # 如果需要标准化特征，应用序列级别的标准化
         if self.normalize_features:
             features = self._normalize_sequence_features(features)
         
-        # 获取未来 T 期的收益率
-        end_target_idx = current_idx + self.prediction_horizon
-        targets = self.targets[current_idx:end_target_idx]  # [T, N]
-        
         return features, targets
+    
+    def _get_valid_stocks_for_sequence(self, features: torch.Tensor) -> torch.Tensor:
+        """
+        找出在整个序列期间都没有NaN值的股票
+        
+        Args:
+            features: [L, F, N] 特征序列
+            
+        Returns:
+            valid_mask: [N] 布尔张量，True表示该股票在整个序列期间都有效
+        """
+        # 检查每只股票在整个序列期间是否有NaN值
+        # any(dim=(0,1)) 表示在时间维度和特征维度上是否有任何NaN值
+        has_nan = torch.isnan(features).any(dim=(0, 1))  # [N]
+        valid_mask = ~has_nan  # 取反，True表示没有NaN值
+        
+        return valid_mask
     
     def _normalize_sequence_features(self, features: torch.Tensor) -> torch.Tensor:
         """
-        改进的序列特征标准化 - 减少过拟合风险
-        - 价格特征：使用序列中位数或加权平均作为标准化基准
-        - 成交量特征：使用序列均值作为标准化基准
+        改进的序列特征标准化 - 处理包含NaN的数据
+        - 价格特征：使用序列中位数或加权平均作为标准化基准（忽略NaN）
+        - 成交量特征：使用序列均值作为标准化基准（忽略NaN）
         - 因子特征：不标准化（已预处理）
         
         Args:
-            features: [L, F, N] 序列特征
+            features: [L, F, N] 序列特征（可能包含NaN）
             
         Returns:
             normalized_features: [L, F, N] 标准化后的序列特征
@@ -117,45 +152,57 @@ class StockDataset(Dataset):
         for stock_idx in range(N):
             stock_features = features[:, :, stock_idx]  # [L, F]
             
-            # 价格特征标准化：使用序列中位数或加权平均（减少异常值影响）
+            # 价格特征标准化：使用序列中位数或加权平均（减少异常值影响，忽略NaN）
             if self.close_feature_index is not None and len(self.price_feature_indices) > 0:
                 close_prices = stock_features[:, self.close_feature_index]  # 整个序列的收盘价
                 
-                # 使用最近5天的均值作为标准化基准（更稳定）
-                recent_days = min(5, L)
-                base_price = close_prices[-recent_days:].mean()
+                # 移除NaN值后计算统计量
+                valid_close_prices = close_prices[~torch.isnan(close_prices)]
                 
-                # 备选：如果均值无效，使用中位数
-                if torch.isnan(base_price) or torch.isinf(base_price) or base_price == 0:
-                    base_price = close_prices.median()
-                
-                # 最终备选：使用最后一天的价格
-                if torch.isnan(base_price) or torch.isinf(base_price) or base_price == 0:
-                    base_price = close_prices[-1]
-                
-                # 应用标准化
-                if base_price != 0 and not torch.isnan(base_price) and not torch.isinf(base_price):
-                    for price_idx in self.price_feature_indices:
-                        normalized_features[:, price_idx, stock_idx] = stock_features[:, price_idx] / base_price
+                if len(valid_close_prices) > 0:
+                    # 使用最近有效价格的均值作为标准化基准
+                    recent_days = min(5, len(valid_close_prices))
+                    base_price = valid_close_prices[-recent_days:].mean()
+                    
+                    # 备选：如果均值无效，使用中位数
+                    if torch.isnan(base_price) or torch.isinf(base_price) or base_price == 0:
+                        base_price = valid_close_prices.median()
+                    
+                    # 最终备选：使用最后一个有效价格
+                    if torch.isnan(base_price) or torch.isinf(base_price) or base_price == 0:
+                        base_price = valid_close_prices[-1]
+                    
+                    # 应用标准化（只对非NaN值进行标准化）
+                    if base_price != 0 and not torch.isnan(base_price) and not torch.isinf(base_price):
+                        for price_idx in self.price_feature_indices:
+                            price_series = stock_features[:, price_idx]
+                            # 只标准化非NaN值
+                            valid_mask = ~torch.isnan(price_series)
+                            normalized_features[valid_mask, price_idx, stock_idx] = price_series[valid_mask] / base_price
             
-            # 成交量特征标准化：使用序列均值（更稳定）
+            # 成交量特征标准化：使用序列均值（更稳定，忽略NaN）
             for vol_idx in self.volume_feature_indices:
                 volume_series = stock_features[:, vol_idx]  # 整个序列的成交量
                 
-                # 使用序列均值作为标准化基准
-                base_volume = volume_series.mean()
+                # 移除NaN值后计算统计量
+                valid_volume = volume_series[~torch.isnan(volume_series)]
                 
-                # 备选：如果均值无效，使用中位数
-                if torch.isnan(base_volume) or torch.isinf(base_volume) or base_volume == 0:
-                    base_volume = volume_series.median()
-                
-                # 最终备选：使用最后一天的成交量
-                if torch.isnan(base_volume) or torch.isinf(base_volume) or base_volume == 0:
-                    base_volume = volume_series[-1]
-                
-                # 应用标准化
-                if base_volume != 0 and not torch.isnan(base_volume) and not torch.isinf(base_volume):
-                    normalized_features[:, vol_idx, stock_idx] = volume_series / base_volume
+                if len(valid_volume) > 0:
+                    # 使用序列均值作为标准化基准
+                    base_volume = valid_volume.mean()
+                    
+                    # 备选：如果均值无效，使用中位数
+                    if torch.isnan(base_volume) or torch.isinf(base_volume) or base_volume == 0:
+                        base_volume = valid_volume.median()
+                    
+                    # 最终备选：使用最后一个有效成交量
+                    if torch.isnan(base_volume) or torch.isinf(base_volume) or base_volume == 0:
+                        base_volume = valid_volume[-1]
+                    
+                    # 应用标准化（只对非NaN值进行标准化）
+                    if base_volume != 0 and not torch.isnan(base_volume) and not torch.isinf(base_volume):
+                        valid_mask = ~torch.isnan(volume_series)
+                        normalized_features[valid_mask, vol_idx, stock_idx] = volume_series[valid_mask] / base_volume
         
         return normalized_features
 
@@ -163,7 +210,7 @@ class StockDataModule(pl.LightningDataModule):
     """股票数据模块"""
     
     def __init__(self,
-                 data_dir: str = '/home/xu/clean_data',
+                 data_dir: str = '/home/xu/clean_data_unaligned',
                  use_factors: bool = True,
                  sequence_length: int = 20,
                  prediction_horizons: List[int] = [1, 5, 10, 20],
@@ -174,7 +221,6 @@ class StockDataModule(pl.LightningDataModule):
                  num_workers: int = 4,
                  normalize_features: bool = True,
                  normalize_targets: bool = True,
-                 normalization_method: str = 'sequence_price_cross_section_return',
                  # 新增鲁棒性控制参数
                  outlier_clip_threshold: float = 5.0,      # 异常值裁剪阈值
                  noise_level: float = 1e-6,                # 噪声水平
@@ -196,7 +242,6 @@ class StockDataModule(pl.LightningDataModule):
             num_workers: 数据加载进程数
             normalize_features: 是否对特征进行标准化
             normalize_targets: 是否对目标进行标准化
-            normalization_method: 标准化方法 ('sequence_price_cross_section_return')
             outlier_clip_threshold: 异常值裁剪阈值（标准差倍数）
             noise_level: 添加的正则化噪声水平
             use_fallback_normalization: 当序列标准化失败时是否使用回退方法
@@ -217,7 +262,6 @@ class StockDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.normalize_features = normalize_features
         self.normalize_targets = normalize_targets
-        self.normalization_method = normalization_method
         self.debug = debug  # 添加调试选项
         
         # 鲁棒性控制参数
@@ -445,32 +489,31 @@ class StockDataModule(pl.LightningDataModule):
         feature_list = []
         feature_names = []
         
-        # 处理价格特征（只填充，不标准化）
+        # 处理价格特征（不填充，保留NaN值）
         for name, data in price_data.items():
             if data is not None:
                 self._debug_print(f"  处理价格特征: {name}")
                 # 对齐数据
                 aligned_data = data.reindex(index=common_dates, columns=common_stocks)
-                # 只填充，不标准化
-                filled_data = aligned_data.ffill().bfill()
-                
-                feature_list.append(filled_data.values)  # [T, N]
+                # 不填充，保留原始NaN值
+                feature_list.append(aligned_data.values)  # [T, N]
                 feature_names.append(name)
         
-        # 处理因子特征（如果使用，不标准化）
+        # 处理因子特征（如果使用，可以选择性填充或不填充）
         if self.use_factors:
             for name, data in factor_data.items():
                 if data is not None:
                     self._debug_print(f"  处理因子特征: {name}")
                     # 对齐数据
                     aligned_data = data.reindex(index=common_dates, columns=common_stocks)
-                    # 因子数据已经标准化，只填充
-                    filled_data = aligned_data.ffill().bfill()
+                    # 因子数据可以选择填充（因为通常已经处理过）
+                    # 这里可以根据需要选择是否填充
+                    filled_data = aligned_data
                     
                     feature_list.append(filled_data.values)  # [T, N]
                     feature_names.append(name)
         
-        # === 4. 处理目标数据（截面标准化）===
+        # === 4. 处理目标数据（截面标准化，NaN填充为0）===
         self._debug_print("=== 4. 处理目标数据 ===")
         
         target_list = []
@@ -481,17 +524,19 @@ class StockDataModule(pl.LightningDataModule):
                 # 对齐数据
                 aligned_data = return_data[return_key].reindex(index=common_dates, columns=common_stocks)
                 
+                # 先填充NaN为0（收益率缺失视为0收益）
+                filled_data = aligned_data.fillna(0)
+                
                 # 截面标准化：每天对所有股票做标准化
                 if self.normalize_targets:
                     normalized_data = self._cross_section_normalize(
-                        aligned_data, train_dates,
+                        filled_data, train_dates,
                         window_size=self.cross_section_window_size,
                         decay_factor=self.cross_section_decay_factor,
                         min_std=self.min_std_threshold
                     )
                 else:
-                    # 如果不标准化，填充缺失值（目标值通常用0填充表示无收益）
-                    normalized_data = aligned_data.fillna(0)
+                    normalized_data = filled_data
                 
                 target_list.append(normalized_data.values)  # [T, N]
         
@@ -534,9 +579,10 @@ class StockDataModule(pl.LightningDataModule):
         """
         改进的截面标准化：每天对所有股票做标准化 - 减少过拟合风险
         使用滚动窗口统计量来提高稳定性
+        注意：输入的df已经将NaN填充为0
         
         Args:
-            df: 要标准化的DataFrame [时间, 股票]
+            df: 要标准化的DataFrame [时间, 股票] (已填充NaN为0)
             train_dates: 训练集日期列表
             window_size: 滚动窗口大小，默认使用self.cross_section_window_size
             decay_factor: 衰减因子，默认使用self.cross_section_decay_factor  
@@ -553,10 +599,10 @@ class StockDataModule(pl.LightningDataModule):
         if min_std is None:
             min_std = getattr(self, 'min_std_threshold', 0.01)
             
-        self._debug_print(f"    改进的截面标准化收益率数据")
+        self._debug_print(f"    改进的截面标准化收益率数据（输入已填充0）")
         
-        # 1. 首先填充缺失值（收益率用0填充）
-        filled_df = df.fillna(0)
+        # 输入的df已经将NaN填充为0，直接使用
+        filled_df = df.copy()
         
         # 2. 计算训练集的滚动截面统计量（使用滚动窗口提高稳定性）
         train_data = filled_df.loc[train_dates]
@@ -639,7 +685,7 @@ class StockDataModule(pl.LightningDataModule):
         
         self._debug_print(f"      标准化后训练集统计: 日均值={train_daily_mean:.6f}, 日标准差={train_daily_std:.6f}")
         
-        # 检查NaN值
+        # 检查NaN值（应该没有，因为输入已经填充）
         nan_count = normalized_df.isna().sum().sum()
         if nan_count > 0:
             self._debug_print(f"      警告: 截面标准化后仍有 {nan_count} 个NaN值")
@@ -758,27 +804,86 @@ class StockDataModule(pl.LightningDataModule):
     def get_normalization_stats(self):
         """获取标准化统计信息"""
         return {
-            'normalization_method': self.normalization_method,
             'normalize_features': self.normalize_features,
             'normalize_targets': self.normalize_targets,
             'price_features': self.price_features,
             'volume_features': self.volume_features
         }
+    
+    def get_data_quality_stats(self):
+        """获取数据质量统计信息，特别是NaN分布"""
+        if self.features is None:
+            return None
+        
+        T, F, N = self.features.shape
+        
+        # 计算每个时间步、特征、股票的NaN统计
+        nan_by_time = torch.isnan(self.features).sum(dim=(1, 2))  # [T] - 每个时间步的NaN数量
+        nan_by_feature = torch.isnan(self.features).sum(dim=(0, 2))  # [F] - 每个特征的NaN数量  
+        nan_by_stock = torch.isnan(self.features).sum(dim=(0, 1))  # [N] - 每只股票的NaN数量
+        
+        # 计算完整序列的股票比例（针对不同序列长度）
+        sequence_lengths = [10, 20, 30, 60]  # 测试不同序列长度
+        complete_sequence_stats = {}
+        
+        for seq_len in sequence_lengths:
+            if seq_len > T:
+                continue
+                
+            complete_stocks_counts = []
+            for start_t in range(T - seq_len + 1):
+                end_t = start_t + seq_len
+                seq_features = self.features[start_t:end_t]  # [seq_len, F, N]
+                
+                # 找出完整的股票
+                has_nan = torch.isnan(seq_features).any(dim=(0, 1))  # [N]
+                complete_stocks = (~has_nan).sum().item()
+                complete_stocks_counts.append(complete_stocks)
+            
+            complete_sequence_stats[seq_len] = {
+                'mean_complete_stocks': np.mean(complete_stocks_counts),
+                'min_complete_stocks': min(complete_stocks_counts),
+                'max_complete_stocks': max(complete_stocks_counts),
+                'std_complete_stocks': np.std(complete_stocks_counts)
+            }
+        
+        return {
+            'total_shape': (T, F, N),
+            'total_nan_count': torch.isnan(self.features).sum().item(),
+            'nan_percentage': torch.isnan(self.features).float().mean().item() * 100,
+            'nan_by_time_stats': {
+                'mean': nan_by_time.float().mean().item(),
+                'min': nan_by_time.min().item(),
+                'max': nan_by_time.max().item(),
+                'std': nan_by_time.float().std().item()
+            },
+            'nan_by_feature_stats': {
+                'mean': nan_by_feature.float().mean().item(),
+                'feature_names': self.feature_names,
+                'nan_counts': nan_by_feature.tolist()
+            },
+            'nan_by_stock_stats': {
+                'mean': nan_by_stock.float().mean().item(),
+                'min': nan_by_stock.min().item(),
+                'max': nan_by_stock.max().item(),
+                'stocks_with_no_nan': (nan_by_stock == 0).sum().item()
+            },
+            'complete_sequence_stats': complete_sequence_stats
+        }
 
 # 使用示例
 def main():
-    """使用示例 - 新的标准化策略"""
+    """使用示例 - 新的数据处理策略：features不填充，动态选择有效股票"""
     
-    # 示例1：只使用价格数据，序列标准化
-    print("=== 示例1：只使用价格数据，序列标准化 ===")
+    # 示例1：只使用价格数据，features不填充，动态选择有效股票
+    print("=== 示例1：价格数据，features不填充，动态选择有效股票 ===")
     price_datamodule = StockDataModule(
         use_factors=False,
         sequence_length=20,
         prediction_horizons=[1, 5, 10],
-        batch_size=32,
+        batch_size=1,
         normalize_features=True,  # 启用序列级价格标准化
         normalize_targets=True,   # 启用截面标准化
-        normalization_method='sequence_price_cross_section_return',
         debug=True  # 开启调试输出
     )
     
@@ -790,31 +895,35 @@ def main():
     batch = next(iter(train_loader))
     features, targets = batch
     
-    print(f"特征形状: {features.shape}")  # [B, L, F, N]
-    print(f"目标形状: {targets.shape}")   # [B, H, N]
+    print(f"批次特征形状: {features.shape}")  # [B, L, F, N_valid] - N_valid可能每个样本不同
+    print(f"批次目标形状: {targets.shape}")   # [B, H, N_valid]
     print(f"特征维度: {price_datamodule.get_feature_dim()}")
-    print(f"股票数量: {price_datamodule.get_stock_num()}")
+    print(f"原始股票数量: {price_datamodule.get_stock_num()}")
     
-    # 检查标准化效果
-    print(f"\n价格特征标准化检查:")
-    if price_datamodule.train_dataset.close_feature_index is not None:
-        close_idx = price_datamodule.train_dataset.close_feature_index
-        print(f"Close价格特征索引: {close_idx}")
-        # 检查最后一天的close价格是否接近1.0（相对标准化）
-        last_day_close = features[15, -1, close_idx, :]  # 第一个样本，最后一天，close特征，所有股票
-        print(f"标准化后最后一天close价格统计: 均值={last_day_close.mean():.4f}, 标准差={last_day_close.std():.4f}")
+    # 检查不同样本的有效股票数量
+    print(f"\n有效股票数量变化:")
+    for i in range(min(5, features.shape[0])):  # 检查前5个样本
+        valid_stocks = features[i].shape[2]  # 第i个样本的有效股票数
+        print(f"  样本{i}: {valid_stocks}只有效股票")
+    
+    # 检查特征中是否还有NaN值
+    nan_count = torch.isnan(features).sum().item()
+    print(f"特征中NaN数量: {nan_count}")
+    
+    # 检查目标中是否还有NaN值（应该为0，因为已填充）
+    target_nan_count = torch.isnan(targets).sum().item()
+    print(f"目标中NaN数量: {target_nan_count}")
     
     # 示例2：使用因子数据和价格数据
-    print("\n=== 示例2：使用因子+价格数据，新标准化策略 ===")
+    print("\n=== 示例2：因子+价格数据，features不填充策略 ===")
     factor_datamodule = StockDataModule(
         use_factors=True,
-        sequence_length=20,
+        sequence_length=30,  # 增加序列长度测试
         prediction_horizons=[1, 5, 10],
-        batch_size=32,
+        batch_size=1,  # 减少batch_size因为每个样本股票数可能不同
         normalize_features=True,  # 序列级价格标准化，因子不标准化
         normalize_targets=True,   # 截面标准化
-        normalization_method='sequence_price_cross_section_return',
-        debug=True  # 关闭调试输出
+        debug=False  # 关闭调试输出
     )
     
     factor_datamodule.prepare_data()
@@ -822,23 +931,59 @@ def main():
     
     # 获取一个批次的数据
     train_loader = factor_datamodule.train_dataloader()
-    batch = next(iter(train_loader))
-    features, targets = batch
+    for _ in range(10):
+        batch = next(iter(train_loader))
+        features, targets = batch
+        
+        print(f"批次特征形状: {features.shape}")  # [B, L, F, N_valid]
+        print(f"批次目标形状: {targets.shape}")   # [B, H, N_valid]
+        print(f"特征维度: {factor_datamodule.get_feature_dim()}")
+        print(f"原始股票数量: {factor_datamodule.get_stock_num()}")
+        
+        # 分析有效股票数量分布
+        valid_stock_counts = []
+        for i in range(features.shape[0]):
+            valid_stocks = features[i].shape[2]
+            valid_stock_counts.append(valid_stocks)
+        
+        print(f"\n有效股票数量统计:")
+        print(f"  平均: {np.mean(valid_stock_counts):.1f}")
+        print(f"  最小: {min(valid_stock_counts)}")
+        print(f"  最大: {max(valid_stock_counts)}")
+        print(f"  标准差: {np.std(valid_stock_counts):.1f}")
+        
+        # 检查特征数据质量
+        print(f"\n数据质量检查:")
+        all_nan_count = 0
+        for i in range(features.shape[0]):
+            sample_nan = torch.isnan(features[i]).sum().item()
+            all_nan_count += sample_nan
+        
+        print(f"  所有样本特征中NaN总数: {all_nan_count}")
+        print(f"  目标中NaN总数: {torch.isnan(targets).sum().item()}")
+        
+        # 测试序列标准化效果
+        print(f"\n序列标准化效果检查:")
+        sample_idx = 0  # 检查第一个样本
+        sample_features = features[sample_idx]  # [L, F, N_valid]
     
-    print(f"特征形状: {features.shape}")  # [B, L, F, N]
-    print(f"目标形状: {targets.shape}")   # [B, H, N]
-    print(f"特征维度: {factor_datamodule.get_feature_dim()}")
-    print(f"股票数量: {factor_datamodule.get_stock_num()}")
+    # 找到close价格特征的索引
+    dataset = factor_datamodule.train_dataset
+    if dataset.close_feature_index is not None:
+        close_idx = dataset.close_feature_index
+        print(f"  Close价格特征索引: {close_idx}")
+        
+        # 检查最后一天的close价格是否接近1.0（相对标准化）
+        last_day_close = sample_features[-1, close_idx, :]  # 最后一天，close特征，所有有效股票
+        if len(last_day_close) > 0:
+            print(f"  标准化后最后一天close价格统计: 均值={last_day_close.mean():.4f}, 标准差={last_day_close.std():.4f}")
     
-    # 检查目标值的截面标准化效果
-    print(f"\n收益率截面标准化检查:")
-    # targets的形状是 [B, H, N]，检查每个horizon每天的均值和标准差
-    for h in range(targets.shape[1]):
-        horizon_targets = targets[:, h, :]  # [B, N]
-        daily_means = horizon_targets.mean(dim=1)  # [B] - 每个样本（日期）的股票均值
-        daily_stds = horizon_targets.std(dim=1)    # [B] - 每个样本（日期）的股票标准差
-        print(f"  Horizon {h+1}: 日均值范围=[{daily_means.min():.4f}, {daily_means.max():.4f}], "
-              f"日标准差范围=[{daily_stds.min():.4f}, {daily_stds.max():.4f}]")
+    print("\n=== 新数据处理策略测试完成 ===")
+    print("主要改进:")
+    print("1. Features不进行数据填充，保留原始NaN值")
+    print("2. 动态选择30天序列中完全有效的股票")
+    print("3. Targets用0填充，表示无收益")
+    print("4. 每个batch的股票数量可能不同，更真实反映数据质量")
 
 if __name__ == "__main__":
     main()

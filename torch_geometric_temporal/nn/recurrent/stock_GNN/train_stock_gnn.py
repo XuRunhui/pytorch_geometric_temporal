@@ -2,7 +2,7 @@
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from torch_geometric_temporal.nn.recurrent.stock_GNN.stock_dataset import StockDataModule
+from torch_geometric_temporal.nn.recurrent.stock_GNN.dataset.stock_dataset import StockDataModule
 from torch_geometric_temporal.nn.recurrent.stock_GNN.adaptive_adj import DynamicGraphLightning
 
 # 优化RTX 4090的Tensor Core性能
