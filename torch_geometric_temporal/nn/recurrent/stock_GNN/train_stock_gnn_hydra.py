@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 import torch
+import torch.nn as nn
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
 from omegaconf import DictConfig, OmegaConf
@@ -40,10 +41,15 @@ from torch_geometric_temporal.nn.recurrent.stock_GNN.dataset.stock_dataset impor
 from torch_geometric_temporal.nn.recurrent.stock_GNN.adaptive_adj import DynamicGraphLightning
 from torch_geometric_temporal.nn.recurrent.stock_GNN.dynamic_graph_core import DynamicGraphCore
 from torch_geometric_temporal.nn.recurrent.stock_GNN.adp_adj_loss import AccumulativeGainLoss
-from torch_geometric_temporal.nn.recurrent.stock_GNN.return_loss import ReturnLoss
+from torch_geometric_temporal.nn.recurrent.stock_GNN.loss.return_loss import ReturnLoss
 
 # Optimize RTX 4090 Tensor Core performance
 torch.set_float32_matmul_precision('medium')
+
+
+def print_config(config: OmegaConf):
+    for cfg_name, cfg_object in config.items():  # Use .items() to iterate over key-value pairs
+        print(f"Using {cfg_name}: {cfg_object}")
 
 
 def setup_callbacks(cfg: DictConfig) -> list:
@@ -91,14 +97,7 @@ def create_data_module(cfg: DictConfig) -> StockDataModule:
         # Use Hydra's instantiate to create the data module
         dm = instantiate(cfg.data)
         
-        print(f"📊 Created data module:")
-        print(f"   - Target: {cfg.data._target_}")
-        print(f"   - Data dir: {cfg.data.data_dir}")
-        print(f"   - Batch size: {cfg.data.batch_size}")
-        print(f"   - Sequence length: {cfg.data.sequence_length}")
-        print(f"   - Prediction horizons: {cfg.data.prediction_horizons}")
-        print(f"   - Normalization method: {cfg.data.normalization_method}")
-        print(f"   - Debug mode: {cfg.data.debug}")
+        print_config(cfg.data)
         
         return dm
         
@@ -108,13 +107,12 @@ def create_data_module(cfg: DictConfig) -> StockDataModule:
 
 
 
-def create_model(cfg: DictConfig, node_feat_dim: int) -> DynamicGraphLightning:
+def create_model(cfg: DictConfig, node_feat_dim: int) -> nn.Module:
     """Create the model from config using Hydra instantiate"""
     try:
 
         # Create core model first
         core_model_cfg = OmegaConf.structured({
-            "node_feat_dim": node_feat_dim,
             **cfg.model
         })
         
@@ -122,25 +120,54 @@ def create_model(cfg: DictConfig, node_feat_dim: int) -> DynamicGraphLightning:
     
         
         print(f"   ✓ Created standalone core model: {core_model.__class__.__name__}")
-        print(f"   ✓ Core model stats: {core_model.get_model_stats()}")
-        
 
         print(f"🧠 Created model:")
-        print(f"   - Target: {cfg.model._target_}")
-        print(f"   - Node features: {node_feat_dim}")
-        print(f"   - GRU hidden: {cfg.model.gru_hidden_dim}")
-        print(f"   - GNN hidden: {cfg.model.gnn_hidden_dim}")
-        print(f"   - Architecture mode: {'Pure GRU' if cfg.model.get('pure_gru', False) else f'GRU + {cfg.model.get('gnn_type', 'GCN').upper()}'})")
-        print(f"   - Learning rate: {cfg.model.lr}")
-        print(f"   - Weight decay: {cfg.model.weight_decay}")
-        print(f"   - Loss function: {cfg.loss._target_}")
-        
+        print_config(core_model_cfg)
         return core_model
         
     except Exception as e:
         print(f"❌ Failed to create model: {e}")
         raise
 
+def create_loss(cfg: DictConfig) -> nn.Module:
+    try:
+        loss_cfg = cfg.loss
+
+        loss_fn = instantiate(loss_cfg)
+
+        print_config(loss_cfg)
+
+        return loss_fn
+    
+    except Exception as e:
+        print(f"❌ Failed to create loss function {e}")
+        raise
+        # model: nn.Module,  # Pass the model instance as an argument
+        # lr: float = 1e-3,
+        # loss_fn: nn.Module = None,
+        # metric_compute_frequency: int = 10,
+        # weight_decay: float = 1e-4,
+        # scheduler_config: dict = None,
+def create_training_module(cfg: DictConfig, model: nn.Module, loss_fn: nn.Module) -> pl.LightningModule:
+
+    try:
+        training_module_cfg = {
+            "_target_": cfg.training_module._target_,  # Ensure the _target_ key is included
+            "model": model,  # Pass the model object directly
+            "loss_fn": loss_fn,  # Pass the loss function object directly
+            **cfg.training_module  # Unpack the rest of the training module configuration
+        }
+
+        training_module = instantiate(training_module_cfg)
+
+        print_config(training_module_cfg)
+
+        return training_module
+
+    except Exception as e:
+        print(f"❌ Failed to create training_module: {e}")
+        raise
+    
 
 def create_trainer(cfg: DictConfig, callbacks: list, logger) -> pl.Trainer:
     """Create PyTorch Lightning trainer from config using Hydra instantiate"""
@@ -159,15 +186,14 @@ def create_trainer(cfg: DictConfig, callbacks: list, logger) -> pl.Trainer:
     if isinstance(devices, int) and devices > 1 and "ddp" in strategy:
         print(f"🔥 Using DDP with {devices} GPUs, strategy: {strategy}")
     
-    # Create trainer config for instantiation
-    trainer_config = OmegaConf.structured({
-        "_target_": "pytorch_lightning.Trainer",
+        # Create trainer config for instantiation
+    trainer_config = {
         "devices": devices,
         "strategy": strategy,
-        "callbacks": callbacks,
-        "logger": logger,
-        **trainer_cfg,
-    })
+        "callbacks": callbacks,  # Pass the list of callback objects directly
+        "logger": logger,  # Pass the logger object directly
+        **trainer_cfg,  # Unpack the rest of the trainer configuration
+    }
     
     try:
         trainer = instantiate(trainer_config)
@@ -225,10 +251,10 @@ def main(cfg: DictConfig) -> None:
         print(f"   ✓ Prediction horizons: {prediction_horizons}")
         
         # 2. Create model (with architecture choice)
-        print(f"\n🧠 Creating model ({architecture_mode})...")
+        # print(f"\n🧠 Creating model ({architecture_mode})...")
         model = create_model(cfg, node_feat_dim)
-        
-
+        loss_fn = create_loss(cfg)
+        training_module = create_training_module(cfg, model, loss_fn)
         # 3. Setup callbacks and logger
         print("\n⚙️ Setting up callbacks and logger...")
         callbacks = setup_callbacks(cfg)
@@ -241,15 +267,15 @@ def main(cfg: DictConfig) -> None:
         # 5. Start training
         print("\n🎯 Starting training...")
         print("-" * 60)
-        trainer.fit(model, datamodule=dm)
+        trainer.fit(training_module, datamodule=dm)
         
         # 6. Test the model
         print("\n🧪 Testing model...")
         print("-" * 60)
-        trainer.test(model, datamodule=dm)
+        trainer.test(training_module, datamodule=dm)
         
         print("\n✅ Training completed successfully!")
-        print(f"🏗️  Final Architecture: {architecture_mode}")
+        # print(f"🏗️  Final Architecture: {architecture_mode}")
         
         # Save final configuration
         config_path = Path(trainer.logger.log_dir) / "config.yaml"

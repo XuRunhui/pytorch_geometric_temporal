@@ -1,6 +1,6 @@
 # PyTorch Lightning Trainer configuration for DDP GPU training
 # @package trainer
-
+_target_: pytorch_lightning.Trainer
 # Basic training settings
 max_epochs: 200
 min_epochs: 10
@@ -9,7 +9,8 @@ check_val_every_n_epoch: 1
 # Hardware settings
 accelerator: "gpu"
 devices: 2
-strategy: "ddp"
+# strategy: "ddp"
+strategy: "ddp_find_unused_parameters_true" 
 precision: 32  # Mixed precision for faster training
 
 # Performance optimizations
@@ -38,12 +39,11 @@ default_root_dir: null  # Will be set by hydra
 
 # DDP specific settings
 sync_batchnorm: true
-find_unused_parameters: false
 
 # Debugging and profiling
 fast_dev_run: false  # Set to true for quick debugging
 overfit_batches: 0  # Set to small number to test overfitting
 detect_anomaly: false  # Enable for debugging NaN/Inf
 
-# Early stopping patience (if using early stopping callback)
-patience: 10
+# # Early stopping patience (if using early stopping callback)
+# patience: 10

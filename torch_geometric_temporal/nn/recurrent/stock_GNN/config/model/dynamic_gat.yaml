@@ -1,0 +1,16 @@
+
+_target_: torch_geometric_temporal.nn.recurrent.stock_GNN.models.dynamic_gat.Dynamic_Gat
+gru_params:
+  input_size: 24  # Number of input features per node (F_in)
+  hidden_size: 64  # Hidden size of the GRU
+  num_layers: 1  # Number of GRU layers
+  batch_first: True  # GRU expects input in (seq_len, batch, features)
+astgcn_params:
+  in_channels: 24  # Number of input features per node (F_in)
+  out_channels: 64  # Number of output features per node
+  periods: 30  # Number of time steps (T_in)
+  batch_size: 1  # Batch size
+  add_self_loops: True
+k_nn: 8  # Number of nearest neighbors for dynamic graph construction
+add_self_loops: true  # Whether to add self-loops to the graph
+linear_output_dim: 32  # Final output dimension after the linear layer

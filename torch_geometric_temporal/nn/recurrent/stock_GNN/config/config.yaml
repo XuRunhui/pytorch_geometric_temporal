@@ -8,12 +8,13 @@ defaults:
   - trainer: ddp_gpu
   - callbacks: default
   - logger: tensorboard
+  - training_module: dynamic_graph_lightning
   - experiment: null  # Can be overridden with experiment=<name>
   - _self_
 
 # Global experiment settings
 experiment:
-  name: "stock_gnn_factor_mining"
+  name: "stock_gnn_factor_cleaned"
   version: null  # Auto-generated if null
   description: "Dynamic GNN for A-share risk factor mining"
   tags: ["stock", "gnn", "factor_mining", "temporal"]

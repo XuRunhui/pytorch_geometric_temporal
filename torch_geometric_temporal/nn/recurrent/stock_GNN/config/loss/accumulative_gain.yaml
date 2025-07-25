@@ -2,7 +2,7 @@
 # @package loss
 
 # Loss function type
-_target_: torch_geometric_temporal.nn.recurrent.stock_GNN.adp_adj_loss.AccumulativeGainLoss
+_target_: torch_geometric_temporal.nn.recurrent.stock_GNN.loss.accumulative_loss.AccumulativeGainLoss
 
 # Loss function parameters
 value_decay: 0.9

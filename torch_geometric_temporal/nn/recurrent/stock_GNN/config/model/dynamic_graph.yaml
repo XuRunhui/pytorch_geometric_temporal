@@ -1,61 +1,71 @@
 # Dynamic Graph Lightning model configuration
 # @package model
 
-defaults:
-  - base_dynamic_graph
+_target_: torch_geometric_temporal.nn.recurrent.stock_GNN.models.dynamic_graph_model.DynamicGraphModel
 
-# Override specific parameters for standard dynamic graph configuration
+node_feat_dim: 24
+gru_hidden_dim: 64
 gnn_hidden_dim: 128
 k_nn: 8
 pure_gru: false
 predict_return: false
 
+output_factor_dim: 32
+
+        # node_feat_dim: int,
+        # gru_hidden_dim: int = 64,
+        # gnn_hidden_dim: int = 64,
+        # k_nn: int = 8,
+        # add_self_loops: bool = True,
+        # predict_return: bool = False,
+        # output_factor_dim: int = 32,
+        # pure_gru: bool = False,
 # GNN specific settings
-gnn_type: "gcn"
+# gnn_type: "gcn"
 add_self_loops: true
 
 # Optimization settings
-lr: 1e-3
-weight_decay: 1e-4
+# lr: 1e-3
+# weight_decay: 1e-4
 
-scheduler_config:
-  type: "plateau"
-  patience: 5
-  factor: 0.5
-  min_lr: 1e-6
-  factor: 0.5
-  min_lr: 1e-6
-  # CosineAnnealingLR parameters  
-  T_max: 100  # For cosine scheduler
-  # StepLR parameters
-  step_size: 30  # For step scheduler
-  gamma: 0.1  # For step/exponential scheduler
+# scheduler_config:
+#   type: "plateau"
+#   patience: 5
+#   factor: 0.5
+#   min_lr: 1e-6
+#   factor: 0.5
+#   min_lr: 1e-6
+#   # CosineAnnealingLR parameters  
+#   T_max: 100  # For cosine scheduler
+#   # StepLR parameters
+#   step_size: 30  # For step scheduler
+#   gamma: 0.1  # For step/exponential scheduler
 
 # Metric computation efficiency
-metric_compute_frequency: 2  # Compute RankIC/ICIR metrics every N epochs (1 = every epoch)
+# metric_compute_frequency: 2  # Compute RankIC/ICIR metrics every N epochs (1 = every epoch)
 
 # Model regularization
-dropout: 0.1
-batch_norm: true
+# dropout: 0.1
+# batch_norm: true
 
 # Graph construction
-adjacency:
-  method: "knn"  # Method for constructing dynamic adjacency
-  symmetric: true
-  add_self_loops: ${model.add_self_loops}
+# adjacency:
+#   method: "knn"  # Method for constructing dynamic adjacency
+#   symmetric: true
+#   add_self_loops: ${model.add_self_loops}
   
 # GNN layers
-gnn:
-  num_layers: 2
-  layer_type: "gcn"  # Options: "gcn", "gat", "sage"
-  activation: "relu"
-  normalize: true
+# gnn:
+#   num_layers: 2
+#   layer_type: "gcn"  # Options: "gcn", "gat", "sage"
+#   activation: "relu"
+#   normalize: true
 
 # GNN type and parameters
-gnn_type: "gcn"  # Options: "gcn", "gat"
+# gnn_type: "gcn"  # Options: "gcn", "gat"
 
-# GAT-specific parameters (only used if gnn_type="gat")
-gat_heads: 4  # Number of attention heads
-gat_dropout: 0.1  # Dropout for attention mechanism
-predict_return: False
-pure_gru: False
+# # GAT-specific parameters (only used if gnn_type="gat")
+# gat_heads: 4  # Number of attention heads
+# gat_dropout: 0.1  # Dropout for attention mechanism
+# predict_return: False
+# pure_gru: False

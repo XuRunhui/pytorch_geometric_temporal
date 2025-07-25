@@ -1,8 +1,11 @@
 # Stock data configuration
 # @package data
 
+
+_target_:  torch_geometric_temporal.nn.recurrent.stock_GNN.dataset.stock_dataset.StockDataModule
+
 # Data source and paths
-data_dir: "/home/xu/clean_data"
+data_dir: "/home/xu/clean_data_unaligned"
 use_factors: true
 
 # Sequence and prediction settings
@@ -15,22 +18,19 @@ val_ratio: 0.15
 test_ratio: 0.15
 
 # Data loading
-batch_size: 32
+batch_size: 1
 num_workers: 4
 
 # Data preprocessing - NEW NORMALIZATION STRATEGY
 normalize_features: true  # Enable sequence-level price/volume normalization
 normalize_targets: true   # Enable cross-section return normalization
-normalization_method: "sequence_price_cross_section_return"  # New method
 debug: false  # Enable detailed normalization logging
 
-# DataLoader settings for DDP
-persistent_workers: true
-drop_last: true
-pin_memory: true
-shuffle_train: true
 
-# Optional data filtering/sampling
-max_stocks: null  # Limit number of stocks for debugging
-start_date: null  # "YYYY-MM-DD" format
-end_date: null    # "YYYY-MM-DD" format
+
+outlier_clip_threshold: 5.0      # 异常值裁剪阈值
+noise_level: 1e-6                # 噪声水平
+use_fallback_normalization: True  # 是否使用回退标准化
+cross_section_window_size: 20      # 截面标准化滚动窗口大小
+cross_section_decay_factor: 0.99 # 截面标准化衰减因子
+min_std_threshold: 0.01          # 最小标准差阈值
