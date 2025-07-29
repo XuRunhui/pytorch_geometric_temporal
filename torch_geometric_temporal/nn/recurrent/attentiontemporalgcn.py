@@ -150,8 +150,19 @@ class A3TGCN2(torch.nn.Module):
         """
         H_accum = 0
         probs = torch.nn.functional.softmax(self._attention, dim=0)
-        for period in range(self.periods):
+        # Initialize hidden state if not provided
+        if H is None:
+            H = torch.zeros(X.shape[0], X.shape[1], self.out_channels).to(X.device)
 
-            H_accum = H_accum + probs[period] * self._base_tgcn( X[:, :, :, period], edge_index, edge_weight, H) #([32, 207, 32]
+        # Iterate over time periods
+        for period in range(self.periods):
+            # Update hidden state using the base TGCN
+            H = self._base_tgcn(X[:, :, :, period], edge_index, edge_weight, H)
+            # Accumulate weighted hidden states
+            H_accum = H_accum + probs[period] * H
+
+        # for period in range(self.periods):
+
+        #     H_accum = H_accum + probs[period] * self._base_tgcn( X[:, :, :, period], edge_index, edge_weight, H) #([32, 207, 32]
 
         return H_accum
