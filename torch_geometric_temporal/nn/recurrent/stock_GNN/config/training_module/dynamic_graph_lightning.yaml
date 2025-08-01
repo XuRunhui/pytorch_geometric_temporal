@@ -12,7 +12,7 @@ _target_: torch_geometric_temporal.nn.recurrent.stock_GNN.training_module.Dynami
 # add_self_loops: true
 
 # Optimization settings
-lr: 1e-3
+lr: 1e-4
 weight_decay: 1e-4
 
 scheduler_config:

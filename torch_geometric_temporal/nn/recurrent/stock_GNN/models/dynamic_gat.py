@@ -112,7 +112,7 @@ class Dynamic_Gat(nn.Module):
         edge_index, edge_weight = self.construct_edge(x)
 
         gat_in = x.permute(0,3,2,1)
-        # print(gat_in.shape)
+        # print(f'input for gat {gat_in.shape}')
         gat_out = self.gat(gat_in, edge_index, edge_weight) # x [b, 207, 2, 12]  returns h [b, 207, 32]
 
         relu_result = F.relu(gat_out)
