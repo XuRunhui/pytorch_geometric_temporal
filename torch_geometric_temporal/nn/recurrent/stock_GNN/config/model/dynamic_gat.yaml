@@ -14,3 +14,5 @@ astgcn_params:
 k_nn: 8  # Number of nearest neighbors for dynamic graph construction
 add_self_loops: true  # Whether to add self-loops to the graph
 linear_output_dim: 32  # Final output dimension after the linear layer
+
+predict_return: True  # Whether to predict returns

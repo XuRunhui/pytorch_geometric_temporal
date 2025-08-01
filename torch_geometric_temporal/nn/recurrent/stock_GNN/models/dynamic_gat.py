@@ -8,7 +8,14 @@ import torch.nn.functional as F
 
 
 class Dynamic_Gat(nn.Module):
-    def __init__(self, gru_params: dict, astgcn_params: dict, k_nn: int = 8, add_self_loops: bool = True, linear_output_dim: int = 32):
+    def __init__(
+            self, gru_params: dict, 
+            astgcn_params: dict, 
+            k_nn: int = 8, 
+            add_self_loops: bool = True, 
+            linear_output_dim: int = 32,
+            predict_return: bool = False
+        ):
         """ 
         Initialize the Dynamic_Gat model with ASTGCN and GRU parameters.
 
@@ -29,8 +36,17 @@ class Dynamic_Gat(nn.Module):
         # Parameters for dynamic graph construction
         self.k_nn = k_nn
         self.add_self_loops = add_self_loops
+        self.linear_output_dim = linear_output_dim
+        self.predict_return = predict_return
 
-        self.linear = nn.Linear(astgcn_params["out_channels"], linear_output_dim)
+        self.linear = nn.Linear(astgcn_params["out_channels"], self.linear_output_dim)
+
+        if self.predict_return:
+            print("🎯 Building return prediction layers")
+            self.return_predictor = nn.ModuleList([
+                nn.ReLU(),
+                nn.Linear(self.linear_output_dim, 7)
+            ])
 
     
     def construct_edge(self, x_seq):
@@ -118,6 +134,9 @@ class Dynamic_Gat(nn.Module):
         relu_result = F.relu(gat_out)
 
         final_out = self.linear(relu_result)
+
+        if self.predict_return:
+            final_out = self.forward_return(final_out)
 
         return final_out
 

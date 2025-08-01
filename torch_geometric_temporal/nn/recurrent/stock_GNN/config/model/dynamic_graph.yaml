@@ -8,7 +8,7 @@ gru_hidden_dim: 64
 gnn_hidden_dim: 128
 k_nn: 8
 pure_gru: false
-predict_return: false
+predict_return: true
 
 output_factor_dim: 32
 

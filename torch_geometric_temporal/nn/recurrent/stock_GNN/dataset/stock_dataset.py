@@ -337,8 +337,8 @@ class StockDataModule(pl.LightningDataModule):
             'growth.pkl', 'profit.pkl', 'leverage.pkl'
         ]
         self.factor_files = [f"filtered_{filename}" for filename in factor_files]
-        # 收益率文件
-        self.return_files = [f'returns_{h}d.pkl' for h in prediction_horizons]
+        # 收益率文件 - 只使用1天期收益率
+        self.return_files = ['returns_1d.pkl']
         
         # 数据容器
         self.features = None
@@ -563,28 +563,28 @@ class StockDataModule(pl.LightningDataModule):
         self._debug_print("=== 4. 处理目标数据 ===")
         
         target_list = []
-        for horizon in self.prediction_horizons:
-            return_key = f'returns_{horizon}d'
-            if return_key in return_data and return_data[return_key] is not None:
-                self._debug_print(f"  处理目标: {return_key}")
-                # 对齐数据
-                aligned_data = return_data[return_key].reindex(index=common_dates, columns=common_stocks)
-                
-                # 不填充NaN值，保留原始NaN
-                raw_data = aligned_data
-                
-                # 截面标准化：每天对所有股票做标准化（忽略NaN值）
-                if self.normalize_targets:
-                    normalized_data = self._cross_section_normalize(
-                        raw_data, train_dates,
-                        window_size=self.cross_section_window_size,
-                        decay_factor=self.cross_section_decay_factor,
-                        min_std=self.min_std_threshold
-                    )
-                else:
-                    normalized_data = raw_data
-                
-                target_list.append(normalized_data.values)  # [T, N]
+        # 只处理1天期收益率
+        return_key = 'returns_1d'
+        if return_key in return_data and return_data[return_key] is not None:
+            self._debug_print(f"  处理目标: {return_key}")
+            # 对齐数据
+            aligned_data = return_data[return_key].reindex(index=common_dates, columns=common_stocks)
+            
+            # 不填充NaN值，保留原始NaN
+            raw_data = aligned_data
+            
+            # 截面标准化：每天对所有股票做标准化（忽略NaN值）
+            if self.normalize_targets:
+                normalized_data = self._cross_section_normalize(
+                    raw_data, train_dates,
+                    window_size=self.cross_section_window_size,
+                    decay_factor=self.cross_section_decay_factor,
+                    min_std=self.min_std_threshold
+                )
+            else:
+                normalized_data = raw_data
+            
+            target_list.append(normalized_data.values)  # [T, N]
         
         # === 5. 构建最终数据 ===
         self._debug_print("=== 5. 构建最终数据 ===")
@@ -597,8 +597,8 @@ class StockDataModule(pl.LightningDataModule):
         
         # Stack features: [T, F, N]
         self.features = torch.tensor(np.stack(feature_list, axis=1), dtype=torch.float32)
-        # Stack targets: [T, N, H]
-        self.targets = torch.tensor(np.stack(target_list, axis=2), dtype=torch.float32)
+        # Stack targets: [T, N] (只有1天期收益率，移除最后一个维度)
+        self.targets = torch.tensor(np.stack(target_list, axis=1).squeeze(-1), dtype=torch.float32)
         
         self.feature_names = feature_names
         self.stock_names = common_stocks

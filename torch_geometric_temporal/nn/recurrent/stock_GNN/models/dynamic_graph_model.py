@@ -84,7 +84,7 @@ class DynamicGraphModel(nn.Module):
             print("🎯 Building return prediction layers")
             self.return_predictor = nn.ModuleList([
                 nn.ReLU(),
-                nn.Linear(self.output_factor_dim, 1)
+                nn.Linear(self.output_factor_dim, 7)
             ])
     
     def forward(self, data_input) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], List[torch.Tensor]]:
@@ -138,8 +138,6 @@ class DynamicGraphModel(nn.Module):
         
         final_out = return_output.view(b, n, -1)
         
-        if self.predict_return:
-            return out.view(b, n, -1), final_out
         return final_out
     
     def _forward_batch_tensor(self, x_seq: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -221,8 +219,6 @@ class DynamicGraphModel(nn.Module):
         
         final_out = return_output.view(b, n, -1)
         
-        if self.predict_return:
-            return out.view(b, n, -1), final_out
         return final_out
     
     def forward_return(self, x: torch.Tensor) -> torch.Tensor:

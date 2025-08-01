@@ -56,11 +56,7 @@ class DynamicGraphLightning(pl.LightningModule):
         """Common loss computation and logging logic"""
         x_t, y_t = batch
         
-        # Forward pass through core model
-        if self.model_config['predict_return']:
-            inter_feature, y_pred = self(x_t)
-        else:
-            y_pred = self(x_t)
+        y_pred = self(x_t)
         
         # Determine if we should compute metrics
         compute_metrics = (stage != "train") or self._should_compute_metrics()
@@ -83,10 +79,8 @@ class DynamicGraphLightning(pl.LightningModule):
             loss = total_loss / total_nodes if total_nodes > 0 else total_loss
         else:
             # Fixed size graphs
-            if self.model_config['predict_return']:
-                loss = self.loss_fn(inter_feature, y_pred, y_t.float(), compute_metrics=compute_metrics)
-            else:
-                loss = self.loss_fn(y_pred, y_t.float(), compute_metrics=compute_metrics)
+
+            loss = self.loss_fn(y_pred, y_t.float(), compute_metrics=compute_metrics)
             
             # Log metrics if computed
             if compute_metrics and hasattr(loss, 'rank_ic_info'):
