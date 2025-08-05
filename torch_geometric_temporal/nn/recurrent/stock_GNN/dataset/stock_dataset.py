@@ -25,7 +25,10 @@ class StockDataset(Dataset):
                  # 鲁棒性参数
                  outlier_clip_threshold: float = 5.0,
                  noise_level: float = 1e-6,
-                 use_fallback_normalization: bool = True):
+                 use_fallback_normalization: bool = True,
+                 # 数据增强参数
+                 add_noise: bool = False,
+                 noise_std: float = 0.01):
         """
         Args:
             features: 特征数据 [时间, 特征数, 股票数]
@@ -40,6 +43,8 @@ class StockDataset(Dataset):
             outlier_clip_threshold: 异常值裁剪阈值
             noise_level: 正则化噪声水平
             use_fallback_normalization: 是否使用回退标准化
+            add_noise: 是否添加随机噪声进行数据增强
+            noise_std: 噪声的标准差
         """
         self.features = features
         self.targets = targets
@@ -57,6 +62,10 @@ class StockDataset(Dataset):
         self.outlier_clip_threshold = outlier_clip_threshold
         self.noise_level = noise_level
         self.use_fallback_normalization = use_fallback_normalization
+        
+        # 数据增强参数
+        self.add_noise = add_noise
+        self.noise_std = noise_std
         
         # 定义价格特征和成交量特征的索引
         self.price_feature_indices = []
@@ -121,6 +130,7 @@ class StockDataset(Dataset):
         
         # 只保留有效股票的数据
         features = features[:, :, valid_stock_mask]  # [L, F, N_valid]
+        # print(targets.shape)
         targets = targets[:, valid_stock_mask]       # [T, N_valid]
         
         # 对targets填充NaN为0（收益率缺失视为0收益）
@@ -129,6 +139,10 @@ class StockDataset(Dataset):
         # 如果需要标准化特征，应用序列级别的标准化
         if self.normalize_features:
             features = self._normalize_sequence_features(features)
+        
+        # 添加随机噪声进行数据增强（仅在训练时）
+        if self.add_noise:
+            features = self._add_noise_to_features(features)
         
         # 准备元数据（如果需要）
         if self.return_metadata:
@@ -251,6 +265,51 @@ class StockDataset(Dataset):
                         normalized_features[valid_mask, vol_idx, stock_idx] = volume_series[valid_mask] / base_volume
         
         return normalized_features
+    
+    def _add_noise_to_features(self, features: torch.Tensor) -> torch.Tensor:
+        """
+        为特征添加随机噪声进行数据增强
+        
+        Args:
+            features: [L, F, N] 序列特征
+            
+        Returns:
+            noisy_features: [L, F, N] 添加噪声后的特征
+        """
+        L, F, N = features.shape
+        
+        # 生成与特征同形状的随机噪声
+        noise = torch.randn_like(features) * self.noise_std
+        
+        # 只对非NaN值添加噪声
+        valid_mask = ~torch.isnan(features)
+        noisy_features = features.clone()
+        
+        # 应用噪声
+        noisy_features[valid_mask] = features[valid_mask] + noise[valid_mask]
+        
+        # 对于价格特征，确保噪声后的值仍然为正数（如果是标准化后的相对价格）
+        if hasattr(self, 'price_feature_indices') and len(self.price_feature_indices) > 0:
+            for price_idx in self.price_feature_indices:
+                # 对于相对价格（通常在0.5-2.0范围内），确保不会变成负数
+                price_features = noisy_features[:, price_idx, :]
+                valid_price_mask = valid_mask[:, price_idx, :]
+                
+                # 将噪声后的负价格设为小正数
+                negative_mask = valid_price_mask & (price_features <= 0)
+                if negative_mask.any():
+                    noisy_features[:, price_idx, :][negative_mask] = 0.01  # 设为很小的正数
+        
+        return noisy_features
+    
+    def set_training_mode(self, is_training: bool):
+        """
+        设置训练模式，控制是否添加噪声
+        
+        Args:
+            is_training: 是否为训练模式
+        """
+        self.add_noise = is_training and hasattr(self, 'noise_std') and self.noise_std > 0
 
 class StockDataModule(pl.LightningDataModule):
     """股票数据模块"""
@@ -274,6 +333,9 @@ class StockDataModule(pl.LightningDataModule):
                  cross_section_window_size: int = 20,      # 截面标准化滚动窗口大小
                  cross_section_decay_factor: float = 0.99, # 截面标准化衰减因子
                  min_std_threshold: float = 0.01,          # 最小标准差阈值
+                 # 数据增强参数
+                 add_noise_to_training: bool = False,      # 是否对训练数据添加噪声
+                 training_noise_std: float = 0.01,         # 训练噪声标准差
                  debug: bool = False):
         """
         Args:
@@ -294,6 +356,8 @@ class StockDataModule(pl.LightningDataModule):
             cross_section_window_size: 截面标准化的滚动窗口大小
             cross_section_decay_factor: 截面标准化的衰减因子
             min_std_threshold: 最小标准差阈值（避免除零）
+            add_noise_to_training: 是否对训练数据添加随机噪声进行数据增强
+            training_noise_std: 训练时添加噪声的标准差
             debug: 是否开启调试模式
         """
         super().__init__()
@@ -317,6 +381,10 @@ class StockDataModule(pl.LightningDataModule):
         self.cross_section_window_size = cross_section_window_size
         self.cross_section_decay_factor = cross_section_decay_factor
         self.min_std_threshold = min_std_threshold
+        
+        # 数据增强参数
+        self.add_noise_to_training = add_noise_to_training
+        self.training_noise_std = training_noise_std
         
         # 数据文件定义 - 只使用复权调整的价格数据
         price_files = [
@@ -597,9 +665,12 @@ class StockDataModule(pl.LightningDataModule):
         
         # Stack features: [T, F, N]
         self.features = torch.tensor(np.stack(feature_list, axis=1), dtype=torch.float32)
+        # for i, target in enumerate(target_list):
+        #     print(f"Target {i} shape: {target.shape}")
         # Stack targets: [T, N] (只有1天期收益率，移除最后一个维度)
-        self.targets = torch.tensor(np.stack(target_list, axis=1).squeeze(-1), dtype=torch.float32)
-        
+        # Since target_list contains only one numpy array, access it directly
+        self.targets = torch.tensor(target_list[0], dtype=torch.float32)
+        # print(f'size of targtes: {self.targets.shape}')
         self.feature_names = feature_names
         self.stock_names = common_stocks
         self.date_index = common_dates
@@ -766,7 +837,9 @@ class StockDataModule(pl.LightningDataModule):
             return_metadata=False,  # Training doesn't need metadata
             outlier_clip_threshold=self.outlier_clip_threshold,
             noise_level=self.noise_level,
-            use_fallback_normalization=self.use_fallback_normalization
+            use_fallback_normalization=self.use_fallback_normalization,
+            add_noise=self.add_noise_to_training,  # 训练集添加噪声
+            noise_std=self.training_noise_std
         )
         
         self.val_dataset = StockDataset(
@@ -780,7 +853,9 @@ class StockDataModule(pl.LightningDataModule):
             return_metadata=False,  # Validation doesn't need metadata
             outlier_clip_threshold=self.outlier_clip_threshold,
             noise_level=self.noise_level,
-            use_fallback_normalization=self.use_fallback_normalization
+            use_fallback_normalization=self.use_fallback_normalization,
+            add_noise=False,  # 验证集不添加噪声
+            noise_std=0.0
         )
         
         self.test_dataset = StockDataset(

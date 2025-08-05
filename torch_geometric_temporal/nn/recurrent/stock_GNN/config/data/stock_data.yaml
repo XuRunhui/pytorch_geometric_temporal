@@ -27,6 +27,9 @@ normalize_targets: true   # Enable cross-section return normalization
 debug: false  # Enable detailed normalization logging
 
 
+add_noise_to_training: true     # 是否对训练数据添加噪声
+training_noise_std: 0.01  
+
 
 outlier_clip_threshold: 5.0      # 异常值裁剪阈值
 noise_level: 1e-6                # 噪声水平

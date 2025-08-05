@@ -111,7 +111,14 @@ class Dynamic_Gat(nn.Module):
         
         return e_idx, e_w
 
-
+    
+    def forward_return(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through return prediction layers"""
+        for layer in self.return_predictor:
+            x = layer(x)
+        return x
+    
+    
     def forward(self, x, edge_index=None):
         """
         Forward pass for the Dynamic_Gat model.

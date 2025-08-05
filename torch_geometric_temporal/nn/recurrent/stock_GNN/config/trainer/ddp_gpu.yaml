@@ -2,7 +2,7 @@
 # @package trainer
 _target_: pytorch_lightning.Trainer
 # Basic training settings
-max_epochs: 200
+max_epochs: 50
 min_epochs: 10
 check_val_every_n_epoch: 1
 
