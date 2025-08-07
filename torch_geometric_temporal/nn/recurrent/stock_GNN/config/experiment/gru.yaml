@@ -4,7 +4,7 @@
 defaults:
   - override /data: stock_data
   - override /model: dynamic_graph
-  - override /loss: accumulative_gain
+  - override /loss: return_loss
   - override /trainer: ddp_gpu
   - override /callbacks: default
   - override /logger: tensorboard
@@ -28,4 +28,4 @@ trainer:
   strategy: "ddp_find_unused_parameters_true" 
 
 logger:
-  name: "gru_experiment"
+  name: "gru_experiment_feature_loss"

@@ -138,7 +138,7 @@ class DynamicGraphModel(nn.Module):
         
         final_out = return_output.view(b, n, -1)
         
-        return final_out
+        return final_out, h
     
     def _forward_batch_tensor(self, x_seq: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Full GNN forward pass for batch tensor input"""
@@ -219,7 +219,7 @@ class DynamicGraphModel(nn.Module):
         
         final_out = return_output.view(b, n, -1)
         
-        return final_out
+        return final_out, h
     
     def forward_return(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through return prediction layers"""

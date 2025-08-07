@@ -14,7 +14,9 @@ class Dynamic_Gat(nn.Module):
             k_nn: int = 8, 
             add_self_loops: bool = True, 
             linear_output_dim: int = 32,
-            predict_return: bool = False
+            predict_return: bool = False,
+            resnet_blocks: int = 2,
+            resnet_hidden_dim: int = 32
         ):
         """ 
         Initialize the Dynamic_Gat model with ASTGCN and GRU parameters.
@@ -24,6 +26,8 @@ class Dynamic_Gat(nn.Module):
             astgcn_params (dict): Dictionary containing parameters for the ASTGCN model.
             k_nn (int): Number of nearest neighbors for dynamic graph construction.
             add_self_loops (bool): Whether to add self-loops to the graph.
+            resnet_blocks (int): Number of ResNet blocks after GRU.
+            resnet_hidden_dim (int): Hidden dimension for ResNet blocks.
         """
         super(Dynamic_Gat, self).__init__()
 
@@ -38,6 +42,30 @@ class Dynamic_Gat(nn.Module):
         self.add_self_loops = add_self_loops
         self.linear_output_dim = linear_output_dim
         self.predict_return = predict_return
+        self.resnet_blocks = resnet_blocks
+        self.resnet_hidden_dim = resnet_hidden_dim
+
+        # Get GRU hidden dimension
+        self.gru_hidden_dim = gru_params["hidden_size"]
+        
+        # ResNet blocks for processing GRU output
+        self.resnet_layers = nn.ModuleList()
+        # self.batch_norm = nn.BatchNorm1d(self.final_gnn_dim)
+        # First layer to transform GRU output to ResNet hidden dimension
+        self.input_projection = nn.Linear(self.gru_hidden_dim, self.resnet_hidden_dim)
+        self.batch_norm = nn.BatchNorm1d(self.resnet_hidden_dim)
+        # ResNet blocks
+        for _ in range(self.resnet_blocks):
+            self.resnet_layers.append(self._make_resnet_block(self.resnet_hidden_dim))
+        
+        # Final fully connected layers
+        self.fc_layers = nn.Sequential(
+            nn.Linear(self.resnet_hidden_dim, self.resnet_hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(self.resnet_hidden_dim // 2, self.gru_hidden_dim),  # Back to original GRU dimension
+            nn.LayerNorm(self.gru_hidden_dim)
+        )
 
         self.linear = nn.Linear(astgcn_params["out_channels"], self.linear_output_dim)
 
@@ -47,6 +75,22 @@ class Dynamic_Gat(nn.Module):
                 nn.ReLU(),
                 nn.Linear(self.linear_output_dim, 7)
             ])
+
+    def _make_resnet_block(self, hidden_dim):
+        """Create a ResNet block"""
+        return nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
+    
+    def _apply_resnet_block(self, x, resnet_block):
+        """Apply ResNet block with residual connection"""
+        residual = x
+        out = resnet_block(x)
+        return F.relu(out + residual)  # Residual connection
 
     
     def construct_edge(self, x_seq):
@@ -63,10 +107,22 @@ class Dynamic_Gat(nn.Module):
         
         # Similarity GRU for graph construction
         gru_out_sim, _ = self.gru(gru_in)
-        h = gru_out_sim[-1].view(b, n, -1)
+        h = gru_out_sim[-1].view(b, n, -1)  # [b, n, gru_hidden_dim]
         
+        # Apply ResNet blocks and fully connected layers to enhance GRU output
+        # Project to ResNet hidden dimension
+        h_projected = self.input_projection(h)  # [b, n, resnet_hidden_dim]
         
-        # Dynamic graph construction
+        # # Apply ResNet blocks
+        h_resnet = h_projected
+        # for resnet_block in self.resnet_layers:
+        #     h_resnet = self._apply_resnet_block(h_resnet, resnet_block)
+        
+        # # Apply final fully connected layers
+        h_resnet = self.batch_norm(h_resnet)
+        h_processed = self.fc_layers(h_resnet)  # [b, n, gru_hidden_dim]
+        # h_processed = h
+        # Dynamic graph construction using processed features
         sim = torch.einsum("bni,bmi->bnm", h, h)  # [b, n, n]
         
         # Top-k edge selection
@@ -89,7 +145,7 @@ class Dynamic_Gat(nn.Module):
             weight_flat = edge_weight[i].contiguous().view(-1)
             
             data = Data(
-                x=h[i],
+                x=h_processed[i],  # Use processed features instead of raw GRU output
                 edge_index=torch.stack([src_flat, dst_flat], dim=0),
                 edge_weight=weight_flat
             )
@@ -109,7 +165,7 @@ class Dynamic_Gat(nn.Module):
                 num_nodes=batch_data.num_nodes
             )
         
-        return e_idx, e_w
+        return e_idx, e_w, h_processed  # Return processed features
 
     
     def forward_return(self, x: torch.Tensor) -> torch.Tensor:
@@ -132,7 +188,7 @@ class Dynamic_Gat(nn.Module):
             torch.Tensor: Output predictions of shape (B, N, T_out).
         """
        
-        edge_index, edge_weight = self.construct_edge(x)
+        edge_index, edge_weight, gru_h = self.construct_edge(x)
 
         gat_in = x.permute(0,3,2,1)
         # print(f'input for gat {gat_in.shape}')
@@ -144,21 +200,24 @@ class Dynamic_Gat(nn.Module):
 
         if self.predict_return:
             final_out = self.forward_return(final_out)
-
-        return final_out
+        print(gru_h.shape)
+        return final_out, gru_h
 
 
     def get_model_stats(self) -> dict:
         """Get model statistics for logging"""
         stats = {
             'node_feat_dim': 24,
-            'gru_hidden_dim': 32,
-            'output_factor_dim': 32,
+            'gru_hidden_dim': self.gru_hidden_dim,
+            'resnet_blocks': self.resnet_blocks,
+            'resnet_hidden_dim': self.resnet_hidden_dim,
+            'output_factor_dim': self.linear_output_dim,
             'pure_gru': False,
-            'gnn_type': 'gcn' ,
-            'k_nn': 8,
-            'predict_return': False,
+            'gnn_type': 'gcn',
+            'k_nn': self.k_nn,
+            'predict_return': self.predict_return,
+            'has_resnet': True,
+            'has_fc_layers': True
         }
-        
         
         return stats

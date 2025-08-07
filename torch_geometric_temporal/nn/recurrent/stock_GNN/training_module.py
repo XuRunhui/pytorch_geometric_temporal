@@ -56,7 +56,7 @@ class DynamicGraphLightning(pl.LightningModule):
         """Common loss computation and logging logic"""
         x_t, y_t = batch
         
-        y_pred = self(x_t)
+        y_pred, gru_h = self(x_t)
         
         # Determine if we should compute metrics
         compute_metrics = (stage != "train") or self._should_compute_metrics()
@@ -71,21 +71,32 @@ class DynamicGraphLightning(pl.LightningModule):
             # Variable length graphs
             total_loss = 0
             total_nodes = 0
-            for i, (pred, target) in enumerate(zip(y_pred, y_t)):
+            # If gru_h is also a list, zip it; otherwise, use the same gru_h for all
+            if isinstance(gru_h, list):
+                gru_h_iter = gru_h
+            else:
+                gru_h_iter = [gru_h] * len(y_pred)
+            
+            for i, (pred, gru_h_i, target) in enumerate(zip(y_pred, gru_h_iter, y_t)):
                 if isinstance(target, torch.Tensor):
-                    loss_i = self.loss_fn(pred, target.float(), compute_metrics=compute_metrics)
+                    # Pass gru_h_i to loss function (for ReturnLoss that uses it)
+                    loss_i = self.loss_fn(pred, gru_h_i, target.float(), compute_metrics=compute_metrics)
                     total_loss += loss_i * pred.size(0)
                     total_nodes += pred.size(0)
             loss = total_loss / total_nodes if total_nodes > 0 else total_loss
         else:
             # Fixed size graphs
-
-            loss = self.loss_fn(y_pred, y_t.float(), compute_metrics=compute_metrics)
+            # Pass gru_h to loss function (for ReturnLoss that uses it)
+            loss = self.loss_fn(y_pred, gru_h, y_t.float(), compute_metrics=compute_metrics)
             
             # Log metrics if computed
             if compute_metrics and hasattr(loss, 'rank_ic_info'):
                 rank_ic_info = loss.rank_ic_info
                 for metric_name, metric_value in rank_ic_info.items():
+                    # Ensure metric_value is on CPU and converted to float
+                    if isinstance(metric_value, torch.Tensor):
+                        metric_value = metric_value.cpu().item()
+                    
                     if not np.isnan(metric_value):
                         self.log(f'{stage}_{metric_name}', metric_value, 
                                 on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)

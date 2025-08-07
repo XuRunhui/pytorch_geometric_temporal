@@ -4,7 +4,7 @@
 _target_: torch_geometric_temporal.nn.recurrent.stock_GNN.models.dynamic_graph_model.DynamicGraphModel
 
 node_feat_dim: 24
-gru_hidden_dim: 64
+gru_hidden_dim: 32
 gnn_hidden_dim: 128
 k_nn: 8
 pure_gru: false

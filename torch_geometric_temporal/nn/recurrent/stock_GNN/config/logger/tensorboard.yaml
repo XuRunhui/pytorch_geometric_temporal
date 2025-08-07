@@ -2,7 +2,7 @@
 # @package logger
 
 _target_: pytorch_lightning.loggers.TensorBoardLogger
-save_dir: "logs"
+save_dir: "logs_feature_loss"
 name: "${experiment.name}"  # Use experiment name instead of fixed "stock_gnn"
 version: null  # Auto-generated
 log_graph: true

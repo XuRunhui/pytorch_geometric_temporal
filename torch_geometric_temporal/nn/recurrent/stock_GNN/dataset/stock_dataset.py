@@ -866,7 +866,7 @@ class StockDataModule(pl.LightningDataModule):
             normalize_features=self.normalize_features,
             date_index=self.date_index[val_end:] if self.date_index else None,
             stock_names=self.stock_names,
-            return_metadata=True,  # Test dataset needs metadata for prediction tracking
+            return_metadata=False,  # Test dataset needs metadata for prediction tracking
             outlier_clip_threshold=self.outlier_clip_threshold,
             noise_level=self.noise_level,
             use_fallback_normalization=self.use_fallback_normalization

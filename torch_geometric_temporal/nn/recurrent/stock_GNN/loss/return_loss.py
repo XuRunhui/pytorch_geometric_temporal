@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Any
+from torch_geometric_temporal.nn.recurrent.stock_GNN.loss.accumulative_loss import AccumulativeGainLoss
 
 class ReturnLoss(nn.Module):
     def __init__(
@@ -15,13 +16,17 @@ class ReturnLoss(nn.Module):
         self.value_decay = value_decay
         self.penalty_weight = penalty_weight
         self.eps = eps
+
+
         # 将列表或 ListConfig 转为 Tensor
         if not isinstance(importance_weights, torch.Tensor):
             self.importance_weights = torch.tensor(importance_weights, dtype=torch.float32)
         else:
             self.importance_weights = importance_weights
 
-    def forward(self, preds: torch.Tensor, y_ts: torch.Tensor, compute_metrics: bool = False) -> torch.Tensor:  
+        self.feature_loss = AccumulativeGainLoss(self.value_decay, self.penalty_weight, self.eps, self.importance_weights)
+
+    def forward(self, preds: torch.Tensor, gru_h: torch.Tensor, y_ts: torch.Tensor, compute_metrics: bool = False) -> torch.Tensor:  
         """
         Args:
             preds: [B, N, T] 模型输出收益率（每个 batch 一个图，未来T期收益）
@@ -48,7 +53,11 @@ class ReturnLoss(nn.Module):
         mse_per_time = torch.mean((preds - y_ts_aligned) ** 2, dim=(0, 1))  # [T]
         weighted_mse = torch.sum(mse_per_time * time_weights) / torch.sum(time_weights)
         
-        total_loss = weighted_mse
+
+        hidden_feature_loss = self.feature_loss(gru_h, y_ts)
+        # hidden_feature_loss = 0
+        total_loss = hidden_feature_loss
+        # + hidden_feature_loss
         
         # 只在需要时计算评估指标
         if compute_metrics:
@@ -132,7 +141,9 @@ class ReturnLoss(nn.Module):
                 'bottom_returns': bottom_actual_returns.item(),
                 'group_spread': group_spread.item(),
                 'rank_ic': rank_ic.item() if isinstance(rank_ic, torch.Tensor) else rank_ic,
-                'icir': icir.item() if isinstance(icir, torch.Tensor) else icir
+                'icir': icir.item() if isinstance(icir, torch.Tensor) else icir,
+                "feature_loss": hidden_feature_loss,
+                "mse_loss": weighted_mse
             }
         
         return total_loss

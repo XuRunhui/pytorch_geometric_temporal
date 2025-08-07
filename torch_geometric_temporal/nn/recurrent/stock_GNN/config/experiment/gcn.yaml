@@ -4,7 +4,7 @@
 defaults:
   - override /data: stock_data
   - override /model: dynamic_graph
-  - override /loss: accumulative_gain
+  - override /loss: return_loss
   - override /trainer: ddp_gpu
   - override /callbacks: default
   - override /logger: tensorboard
@@ -22,7 +22,8 @@ seed: 42
 
 
 trainer:
-  strategy: "ddp"
+  # strategy: "ddp"
+  strategy: "ddp_find_unused_parameters_true" 
 
 logger:
-  name: "gcn_experiment"
+  name: "gcn_experiment_feature_loss"
