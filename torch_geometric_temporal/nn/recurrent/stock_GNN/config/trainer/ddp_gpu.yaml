@@ -8,9 +8,10 @@ check_val_every_n_epoch: 1
 
 # Hardware settings
 accelerator: "gpu"
-devices: 2
+devices: 1
 # strategy: "ddp"
-strategy: "ddp_find_unused_parameters_true" 
+# strategy: "ddp_find_unused_parameters_true" 
+strategy: "auto"  # Use auto strategy for single GPU
 precision: 32  # Mixed precision for faster training
 
 # Performance optimizations
@@ -37,8 +38,8 @@ val_check_interval: 1.0  # Check validation every epoch
 enable_checkpointing: true
 default_root_dir: null  # Will be set by hydra
 
-# DDP specific settings
-sync_batchnorm: true
+# DDP specific settings (disabled for single GPU)
+# sync_batchnorm: true
 
 # Debugging and profiling
 fast_dev_run: false  # Set to true for quick debugging

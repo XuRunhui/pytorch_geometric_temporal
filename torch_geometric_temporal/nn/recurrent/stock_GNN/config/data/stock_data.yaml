@@ -5,7 +5,7 @@
 _target_:  torch_geometric_temporal.nn.recurrent.stock_GNN.dataset.stock_dataset.StockDataModule
 
 # Data source and paths
-data_dir: "/home/xu/clean_data_unaligned"
+data_dir: "/root/pytorch_geometric_temporal/data"
 use_factors: true
 
 # Sequence and prediction settings

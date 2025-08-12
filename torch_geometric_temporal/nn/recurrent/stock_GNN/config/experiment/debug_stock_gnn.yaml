@@ -1,0 +1,26 @@
+# @package _global_
+# GAT experiment configuration - Dynamic Graph with ASTGCN
+
+defaults:
+  - override /data: stock_data
+  - override /model: dynamic_gat
+  - override /loss: accumulative_gain
+  - override /trainer: single_gpu
+  - override /callbacks: default
+  - override /logger: tensorboard
+  - override /training_module: dynamic_graph_lightning
+
+# Experiment metadata
+experiment:
+  name: "gat_astgcn_experiment"
+  version: null  # Auto-generated if null
+  description: "Experiment using GAT-like dynamic graph with ASTGCN for stock factor prediction"
+  tags: ["gat", "astgcn", "stock", "dynamic_graph", "factor_prediction"]
+
+# Random seed for reproducibility
+seed: 42
+
+
+
+logger:
+  name: "gat_experiment"
