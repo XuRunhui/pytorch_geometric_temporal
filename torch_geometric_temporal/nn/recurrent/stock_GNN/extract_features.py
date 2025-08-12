@@ -215,27 +215,30 @@ class FeatureExtractor:
                 if len(batch_data) == 3:
                     # With metadata
                     features, targets, metadata = batch_data
-                    sample_idx = metadata['current_idx'] if isinstance(metadata, dict) else metadata[0]['current_idx']
-                    valid_stock_mask = metadata['valid_stock_mask'] if isinstance(metadata, dict) else metadata[0]['valid_stock_mask']
+                    metadata_dict = metadata[0] if isinstance(metadata, list) else metadata
+                    sample_idx = metadata_dict['current_idx']
+                    valid_stock_names = metadata_dict.get('valid_stock_names', [])
                 else:
                     # Without metadata, need to compute sample index
                     features, targets = batch_data
                     sample_idx = dataset.valid_indices[batch_idx]
-                    # Get valid stocks for this sample
+                    # Get valid stocks for this sample - fallback method
                     valid_stock_mask = dataset._get_valid_stocks_for_sequence(features[0])
+                    # Convert mask to stock names
+                    valid_stock_names = [dataset.stock_names[i] for i in range(len(valid_stock_mask)) if valid_stock_mask[i]]
                 
                 # Move to device
                 features = features.to(self.device)
                 
-                # Extract 32-dim features from model (before final prediction layer)
+                # Extract features from model
                 batch_features = self._extract_model_features(features)
                 
                 # Store results
                 all_features.append(batch_features.cpu().numpy())
                 all_sample_indices.append(sample_idx)
                 all_valid_stocks_info.append({
-                    'valid_mask': valid_stock_mask.cpu().numpy() if isinstance(valid_stock_mask, torch.Tensor) else valid_stock_mask,
-                    'n_valid_stocks': len(batch_features[0]) if len(batch_features.shape) > 1 else batch_features.shape[-1]
+                    'valid_stock_names': valid_stock_names,
+                    'n_valid_stocks': len(valid_stock_names)
                 })
         
         return {
@@ -262,15 +265,15 @@ class FeatureExtractor:
         self.logger.info(f"Model output shape: {features.shape}")
         return features
     
-    def align_features_to_original_grid(self, extracted_data: Dict) -> pd.DataFrame:
+    def align_features_to_original_grid(self, extracted_data: Dict) -> List[pd.DataFrame]:
         """
-        Align extracted features to original data grid with proper date/stock indexing
+        Align extracted features to original data grid using valid_stock_names from metadata
         
         Args:
             extracted_data: Dictionary containing extracted features and metadata
             
         Returns:
-            DataFrame with proper date/stock indexing and NaN for missing values
+            List of DataFrames with proper date/stock indexing and NaN for missing values
         """
         self.logger.info(f"Aligning features for {extracted_data['dataset_name']} dataset...")
         
@@ -293,14 +296,19 @@ class FeatureExtractor:
             dtype=np.float32
         )
         
-        # Fill in available features
+        # Statistics for debugging
+        filled_positions = 0
+        total_positions = len(self.original_dates) * len(self.original_stocks)
+        
+        # Fill in available features using valid_stock_names
         for i, (features, sample_idx, stock_info) in enumerate(zip(
             extracted_data['features'],
             extracted_data['sample_indices'], 
             extracted_data['valid_stocks_info']
         )):
             if sample_idx < len(self.original_dates):
-                valid_mask = stock_info['valid_mask']
+                # Get valid stock names from metadata
+                valid_stock_names = stock_info.get('valid_stock_names', [])
                 
                 # Handle different feature shapes
                 if len(features.shape) == 3:  # [batch_size, n_stocks, feature_dim]
@@ -311,21 +319,46 @@ class FeatureExtractor:
                     self.logger.warning(f"Unexpected feature shape: {features.shape}")
                     continue
                 
-                # Map features to original stock positions
-                stock_positions = np.where(valid_mask)[0]
-                if len(stock_positions) == features.shape[0]:
-                    result_array[sample_idx, stock_positions, :] = features
+                # Debug info for first few samples
+                if i < 5:
+                    self.logger.info(f"Sample {i}: date_idx={sample_idx}, date={self.original_dates[sample_idx]}")
+                    self.logger.info(f"  Valid stocks: {len(valid_stock_names)}")
+                    self.logger.info(f"  Feature shape: {features.shape}")
+                    self.logger.info(f"  Sample valid stocks: {valid_stock_names[:5] if len(valid_stock_names) > 5 else valid_stock_names}")
+                
+                # Map features to stock positions using stock names
+                if len(valid_stock_names) == features.shape[0]:
+                    for j, stock_name in enumerate(valid_stock_names):
+                        if stock_name in self.original_stocks:
+                            stock_idx = self.original_stocks.index(stock_name)
+                            result_array[sample_idx, stock_idx, :] = features[j]
+                            filled_positions += 1
+                        else:
+                            self.logger.warning(f"Stock {stock_name} not found in original stocks")
                 else:
-                    self.logger.warning(f"Mismatch in stock count at index {sample_idx}")
+                    self.logger.warning(f"Mismatch in stock count at index {sample_idx}: "
+                                      f"expected {len(valid_stock_names)}, got {features.shape[0]}")
+        
+        # Log coverage statistics
+        coverage = filled_positions / total_positions * 100
+        self.logger.info(f"Data coverage: {filled_positions}/{total_positions} ({coverage:.2f}%)")
         
         # Convert to list of DataFrames (one per feature dimension)
         feature_dfs = []
         for feat_dim in range(feature_dim):
             df = pd.DataFrame(
                 result_array[:, :, feat_dim],
-                index=self.original_dates,
-                columns=self.original_stocks
+                index=pd.Index(self.original_dates, name='date'),
+                columns=pd.Index(self.original_stocks, name='stock')
             )
+            
+            # Log statistics for this feature dimension
+            non_nan_count = df.notna().sum().sum()
+            total_count = df.size
+            coverage_dim = non_nan_count / total_count * 100
+            
+            self.logger.info(f"Feature dim {feat_dim}: {non_nan_count}/{total_count} non-NaN ({coverage_dim:.2f}%)")
+            
             feature_dfs.append(df)
         
         return feature_dfs
